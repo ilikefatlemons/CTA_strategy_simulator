@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# raw fetched market data - regenerable via src/data/fetch_yfinance.py, keep repo light
+data/raw/*.csv
+
+.ipynb_checkpoints/
+.DS_Store
