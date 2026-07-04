@@ -9,7 +9,9 @@ timestamp, symbol, sector, open, high, low, close, volume.
 import os
 
 import pandas as pd
+from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.models.bars import BarSet
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from dotenv import load_dotenv
@@ -23,7 +25,7 @@ SYMBOLS = {
     "JPM": "Financials",
 }
 
-TIMEFRAME = TimeFrame(5, TimeFrameUnit.Minute)
+TIMEFRAME = TimeFrame(5, TimeFrameUnit.Minute)  # type: ignore[arg-type]  # alpaca-py mis-annotates enum members as `str`
 LOOKBACK_DAYS = 730  # ~2 years; free/paper accounts get IEX-feed history this far back
 
 OUT_DIR = "data/raw"
@@ -42,9 +44,10 @@ def fetch_symbol(client: StockHistoricalDataClient, symbol: str, sector: str) ->
         symbol_or_symbols=symbol,
         timeframe=TIMEFRAME,
         start=start.to_pydatetime(),
-        feed="iex",  # free-tier data feed
+        feed=DataFeed.IEX,  # free-tier data feed
     )
     bars = client.get_stock_bars(request)
+    assert isinstance(bars, BarSet), f"expected BarSet, got {type(bars)}"
     df = bars.df
 
     if df.empty:
