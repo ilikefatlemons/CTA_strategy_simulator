@@ -7,8 +7,10 @@ env/
 .vscode
 # raw fetched market data - regenerable via src/data/fetch_alpaca.py, keep repo light
 data/raw/*.csv
-# backtest output - regenerable via src/run_phase2.py
+# backtest output - regenerable via src/run_phase2.py, src/run_phase3.py
 data/phase2_trades.csv
+data/phase3_trades.csv
+data/phase3_weights.csv
 
 .ipynb_checkpoints/
 .DS_Store

@@ -47,3 +47,9 @@ class ReentryRule(ABC):
     @abstractmethod
     def can_reenter(self, history: pd.DataFrame, bars_since_exit: int) -> bool:
         """Gate whether the entry rule is even consulted while in cooldown."""
+
+
+class PositionSizer(ABC):
+    @abstractmethod
+    def weights(self, vols: dict[str, float]) -> dict[str, float]:
+        """Map symbol -> trailing vol estimate to symbol -> target portfolio weight."""
