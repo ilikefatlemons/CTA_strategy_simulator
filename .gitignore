@@ -3,9 +3,12 @@ __pycache__/
 .venv/
 venv/
 env/
-
-# raw fetched market data - regenerable via src/data/fetch_yfinance.py, keep repo light
+.env
+.vscode
+# raw fetched market data - regenerable via src/data/fetch_alpaca.py, keep repo light
 data/raw/*.csv
+# backtest output - regenerable via src/run_phase2.py
+data/phase2_trades.csv
 
 .ipynb_checkpoints/
 .DS_Store

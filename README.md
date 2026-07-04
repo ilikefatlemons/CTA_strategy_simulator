@@ -13,7 +13,7 @@
 - **执行标准一致**：所有标的用同一套入场/出场/仓位规则，不因个股"性质"（波动率、板块）改变逻辑本身——差异只体现在**仓位大小**（vol-targeting），不体现在**规则**上。
 - **规则可扩展**：入场信号（MACD金叉等）、止盈止损、再入场逻辑都要做成插件式模块，方便后续自己往里加规则，而不用改核心引擎。
 - **可视化验证**：本地交互式K线图，左边显示K线+买卖点标记，右边显示策略净值曲线/回撤，用来直观验证信号和绩效是否符合预期。
-- **直接用真实数据搭框架**（Alpaca），跑通后再考虑接入更专业的数据源。
+- **直接用真实数据搭框架**（alpaca），跑通后再考虑接入更专业的数据源。
 
 > MVP 原则：先做一个端到端能跑通的最小闭环（1个entry规则+1个exit规则+1个reentry规则+跨标的仓位分配+Sharpe+可视化），不追求功能完整，验证过闭环后再逐步加规则/指标。
 
@@ -23,7 +23,7 @@
 
 **In scope (MVP):**
 - 单一时间框架（5分钟bar）回测引擎
-- Alpaca 真实分钟级行情抓取（NVDA / KO / XOM / JPM 四标的，覆盖高/低波动率+不同板块）
+- alpaca 真实分钟级行情抓取（NVDA / KO / XOM / JPM 四标的，覆盖高/低波动率+不同板块）
 - 可插拔规则框架：Entry(MACD金叉) / Exit(ATR TP-SL) / Re-entry(冷却期) / Position sizing(vol-inverse)
 - 波动率倒数加权仓位分配 (vol-targeting)，**每日 rebalance**
 - 绩效指标：**Sharpe only**（其余指标留到 MVP 验证通过后再加）
@@ -79,11 +79,11 @@
 
 ## 4. 核心模块设计
 
-### 4.1 Data Layer — Alpaca 真实数据
+### 4.1 Data Layer — alpaca 真实数据
 - MVP 标的篮子：**NVDA**(科技/高波动), **KO**(消费/低波动), **XOM**(能源), **JPM**(金融) — 覆盖不同板块+波动率，让 vol-targeting 的仓位差异真实可见
-- 频率：**5分钟bar**（Alpaca 免费/paper账户走 IEX feed，5m bar 可回溯约2年历史，样本量远大于 yfinance 的60天上限，足够跑出多笔交易和有意义的 Sharpe）
+- 频率：**5分钟bar**（alpaca `1m` 只保留近7天历史，样本太少；`5m` 可回溯60天，足够跑出多笔交易和有意义的 Sharpe）
 - 输出统一 schema（未来接真实数据源的契约）：`timestamp, symbol, sector, open, high, low, close, volume`
-- 抓取后落地为本地 CSV（`data/raw/{symbol}_5m.csv`），下游所有层只读 CSV，不直接依赖 Alpaca——方便以后换数据源或做校准
+- 抓取后落地为本地 CSV（`data/raw/{symbol}_5m.csv`），下游所有层只读 CSV，不直接依赖 alpaca——方便以后换数据源或做校准
 - 模拟数据生成器（GBM+板块相关性因子模型）作为**后续可选项**保留在设计里，用于压力测试/校准，不在 MVP 路径上
 
 ### 4.2 Strategy Rule Framework（可扩展规则框架）
@@ -118,7 +118,7 @@
 不建议一上来就搭可视化——那是"看得见但立不住"的部分。按依赖关系从底层往上：
 
 1. **Phase 0**：白皮书 + 目录结构 + 技术选型确认 ✅ 已完成
-2. **Phase 1**：Alpaca 数据抓取（NVDA/KO/XOM/JPM, 5m bar, 约2年历史）→ 落地 CSV，确认 schema ✅ 已完成 (`src/data/fetch_alpaca.py` → `data/raw/{symbol}_5m.csv`, 各约3.8-4.2万行；API key 存于本地 `.env`，已gitignore)
+2. **Phase 1**：alpaca 数据抓取（NVDA/KO/XOM/JPM, 5m bar, 60天）→ 落地 CSV，确认 schema ✅ 已完成 (`src/data/fetch_alpaca.py` → `data/raw/{symbol}_5m.csv`, 各4680行)
 3. **Phase 2（下一步）**：规则框架骨架（抽象基类 + MACD金叉入场 + ATR TP/SL出场 + 冷却期再入场）——先在单标的上跑通端到端
 4. **Phase 3**：加入 InverseVolatilitySizer，扩展到四标的组合回测，每日 rebalance，验证"同规则不同仓位"
 5. **Phase 4**：Sharpe 计算（组合级 + 单标的级对比）
@@ -132,7 +132,7 @@
 ## 6. 技术选型 (Locked decisions)
 
 - 可视化库：**`lightweight-charts-python`**
-- 数据来源：**Alpaca 真实数据**（NVDA/KO/XOM/JPM, 5m bar），模拟数据+因子模型相关性结构留作后续校准/压力测试用途
+- 数据来源：**alpaca 真实数据**（NVDA/KO/XOM/JPM, 5m bar），模拟数据+因子模型相关性结构留作后续校准/压力测试用途
 - 回测引擎支持**双向**（多空），CTA标准做法
 - 仓位再平衡频率：**每日**（不是每根bar——避免追逐波动率估计本身的噪音，且更贴近真实交易成本假设）
 - 目标组合波动率标量：MVP暂不设，先验证 InverseVolatilitySizer 的相对权重逻辑

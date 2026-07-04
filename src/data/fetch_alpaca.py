@@ -67,6 +67,13 @@ def fetch_symbol(client: StockHistoricalDataClient, symbol: str, sector: str) ->
     df["symbol"] = symbol
     df["sector"] = sector
 
+    # keep regular trading hours only (09:30-16:00 ET) - some feeds/symbols include
+    # pre/post-market bars which would break the "same execution rules for all
+    # symbols" constraint (e.g. NVDA showing 12:00 UTC bars vs 13:30 UTC for others)
+    et_time = df["timestamp"].dt.tz_convert("America/New_York").dt.time
+    in_session = (et_time >= pd.Timestamp("09:30").time()) & (et_time < pd.Timestamp("16:00").time())
+    df = df[in_session]
+
     return df[["timestamp", "symbol", "sector", "open", "high", "low", "close", "volume"]]
 
 
