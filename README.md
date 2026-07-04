@@ -119,7 +119,7 @@
 
 1. **Phase 0**：白皮书 + 目录结构 + 技术选型确认 ✅ 已完成
 2. **Phase 1**：alpaca 数据抓取（NVDA/KO/XOM/JPM, 5m bar, 60天）→ 落地 CSV，确认 schema ✅ 已完成 (`src/data/fetch_alpaca.py` → `data/raw/{symbol}_5m.csv`, 各4680行)
-3. **Phase 2（下一步）**：规则框架骨架（抽象基类 + MACD金叉入场 + ATR TP/SL出场 + 冷却期再入场）——先在单标的上跑通端到端
+3. **Phase 2**：规则框架骨架（抽象基类 + MACD金叉入场 + ATR TP/SL出场 + 冷却期再入场）——先在单标的上跑通端到端 ✅ 已完成 (`src/rules/`: `EntryRule`/`ExitRule`/`ReentryRule` 抽象基类 + `MACDGoldenCross`/`ATRTakeProfitStopLoss`/`CooldownReentry`；`src/engine/backtest.py`: bar-by-bar 状态机 FLAT→ENTERED→COOLDOWN→FLAT，信号收盘决定、下一根开盘成交，避免未来函数；`src/run_phase2.py` 在 NVDA 上跑通，$10,000 初始资金按百分比收益复利，无仓位管理/手续费/滑点——留给 Phase 3+)
 4. **Phase 3**：加入 InverseVolatilitySizer，扩展到四标的组合回测，每日 rebalance，验证"同规则不同仓位"
 5. **Phase 4**：Sharpe 计算（组合级 + 单标的级对比）
 6. **Phase 5**：交互式可视化（lightweight-charts-python：K线+买卖点 左，净值曲线 右）
