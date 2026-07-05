@@ -35,3 +35,19 @@ Note:
 2024-08-28,0.0777377560406031,0.3999849651457752,0.28205395212202594,0.24022332669159585
 2024-08-29,0.08871340283536701,0.41728959404049276,0.26312063375689154,0.23087636936724854
 ->nvda weight sudden spike since the 20-day range does not count in the day with high volatility anymore. This could be fixed later using a smoothing filter or something.
+
+Phase 4:
+意思是:vol-targeting(按波动率倒数分配仓位)这套仓位分配逻辑的设计目的,是让组合里每个标的对整体风险的贡献差不多大——不会出现"NVDA波动大,一有事组合就跟着大起大落"这种单一标的主导整个组合风险的情况。理想效果是:组合的风险调整后收益(Sharpe)应该比最差的单标的更好,至少不会比所有单标的都差,因为拉平风险贡献本身就该带来一定的分散化收益。
+
+但现在看到的数据是:
+- 组合 Sharpe = -0.61
+- 单标的分别是 NVDA 0.62、KO -0.32、XOM -0.64、JPM -0.08
+
+组合的 Sharpe 比四个标的里三个(NVDA、KO、JPM)都差,只比最差的 XOM (-0.64) 好一点点。这说明"拉平风险贡献"没有转化成组合层面更好的风险调整收益——换句话说,仓位分配机制在数学上按波动率倒数分配了权重,但没有产生预期中"分散化让组合更稳"的效果。
+
+可能的原因(还没细查,留给后续):
+1. 四个标的的收益之间相关性不够低甚至是正相关,分散化本身收益有限
+2. 每日 rebalance 本身有交易成本类的隐性损耗(虽然当前没建模手续费/滑点,但频繁调仓改变了每笔交易的实际持仓规模和时点)
+3. NVDA(表现最好、Sharpe最高)权重被按低波动率标准压得最低,组合反而没吃到它的正收益
+
+One comparison caveat worth knowing, not a bug: portfolio Sharpe is computed over common_idx (the intersection of all 4 symbols' timestamps), while each standalone per-symbol Sharpe uses that symbol's own full bar history. Row counts differ slightly (NVDA 38688 vs JPM 38401 bars) due to scattered missing intraday bars, not missing days — so the windows are close but not bar-for-bar identical. Doesn't change the qualitative conclusion, just means the two Sharpe numbers aren't computed over an exactly identical bar set. (✅fixed: align_to_common_index computes the intersection of all four symbols' exact timestamps and keeps only bars present in every symbol — any bar that's missing in even one ticker gets dropped from all of them.)

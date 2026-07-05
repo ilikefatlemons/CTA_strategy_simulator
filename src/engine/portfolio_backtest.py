@@ -47,6 +47,25 @@ class PortfolioBacktestResult:
     weights_history: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
+def align_to_common_index(dfs: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """
+    Restrict every symbol's bars to the timestamps present in all symbols.
+
+    Exposed so callers comparing a standalone single-symbol backtest against
+    the portfolio backtest can run both over the exact same bars - otherwise
+    a standalone run would see extra bars the portfolio run drops, which can
+    shift its entry/exit signals and confound the comparison with more than
+    just the sizing difference.
+    """
+    symbols = list(dfs.keys())
+    common_idx = None
+    for s in symbols:
+        idx = pd.DatetimeIndex(dfs[s]["timestamp"])
+        common_idx = idx if common_idx is None else common_idx.intersection(idx)
+    common_idx = common_idx.sort_values()
+    return {s: dfs[s].set_index("timestamp").loc[common_idx].reset_index() for s in symbols}
+
+
 def run_portfolio_backtest(
     dfs: dict[str, pd.DataFrame],
     strategy: Strategy,
@@ -60,14 +79,9 @@ def run_portfolio_backtest(
     # vol estimates use each symbol's full own history, not the aligned subset
     vol_series = {s: rolling_daily_vol(daily_closes(dfs[s]), vol_window) for s in symbols}
 
-    common_idx = None
-    for s in symbols:
-        idx = pd.DatetimeIndex(dfs[s]["timestamp"])
-        common_idx = idx if common_idx is None else common_idx.intersection(idx)
-    common_idx = common_idx.sort_values()
+    aligned = align_to_common_index(dfs)
+    common_idx = pd.DatetimeIndex(aligned[symbols[0]]["timestamp"])
     dates = common_idx.date
-
-    aligned = {s: dfs[s].set_index("timestamp").loc[common_idx].reset_index() for s in symbols}
 
     T = len(common_idx)
     cash = initial_capital
@@ -108,8 +122,30 @@ def run_portfolio_backtest(
             for s in symbols:
                 if state[s] is State.ENTERED and position[s] is not None:
                     open_price = aligned[s]["open"].iloc[i]
+                    weight = current_weights[s]
+                    if weight <= 0:
+                        # vol estimate unavailable/excluded today - can no longer
+                        # size this position, so close it out properly instead of
+                        # silently zeroing shares while leaving state ENTERED
+                        delta = 0.0 - shares[s]
+                        cash -= delta * open_price
+                        shares[s] = 0.0
+                        trades.append(
+                            Trade(
+                                symbol=s,
+                                side=position[s].side,
+                                entry_bar_idx=position[s].entry_bar_idx,
+                                entry_price=position[s].entry_price,
+                                exit_bar_idx=i,
+                                exit_price=open_price,
+                            )
+                        )
+                        position[s] = None
+                        state[s] = State.COOLDOWN
+                        bars_since_exit[s] = 0
+                        continue
                     side_sign = 1 if position[s].side is Side.LONG else -1
-                    target_shares = side_sign * current_weights[s] * eq / open_price
+                    target_shares = side_sign * weight * eq / open_price
                     delta = target_shares - shares[s]
                     cash -= delta * open_price
                     shares[s] = target_shares
