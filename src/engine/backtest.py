@@ -35,6 +35,7 @@ class Trade:
     entry_price: float
     exit_bar_idx: int
     exit_price: float
+    reason: str
 
     @property
     def pnl(self) -> float:
@@ -90,7 +91,8 @@ def run_backtest(
 
         if state is State.ENTERED and position is not None:
             held_bars = i - position.entry_bar_idx
-            if held_bars >= min_holding_bars and strategy.exit_rule.should_exit(history, position):
+            reason = strategy.exit_rule.exit_reason(history, position) if held_bars >= min_holding_bars else None
+            if reason:
                 exit_price = df["close"].iloc[i]
                 trade = Trade(
                     side=position.side,
@@ -98,6 +100,7 @@ def run_backtest(
                     entry_price=position.entry_price,
                     exit_bar_idx=i,
                     exit_price=exit_price,
+                    reason=reason,
                 )
                 trades.append(trade)
                 capital *= 1 + trade.return_pct

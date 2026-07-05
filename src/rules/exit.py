@@ -20,10 +20,10 @@ class ATRTakeProfitStopLoss(ExitRule):
         self.tp_mult = tp_mult
         self.sl_mult = sl_mult
 
-    def should_exit(self, history: pd.DataFrame, position: Position) -> bool:
+    def exit_reason(self, history: pd.DataFrame, position: Position) -> str | None:
         entry_history = history.iloc[: position.entry_bar_idx + 1]
         if len(entry_history) < self.atr_period + 1:
-            return False
+            return None
 
         entry_atr = atr(entry_history, self.atr_period)
         current_price = history["close"].iloc[-1]
@@ -33,4 +33,8 @@ class ATRTakeProfitStopLoss(ExitRule):
         else:
             move = position.entry_price - current_price
 
-        return move >= self.tp_mult * entry_atr or move <= -self.sl_mult * entry_atr
+        if move >= self.tp_mult * entry_atr:
+            return "TP"
+        if move <= -self.sl_mult * entry_atr:
+            return "SL"
+        return None

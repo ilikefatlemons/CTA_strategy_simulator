@@ -1,3 +1,5 @@
+TO RUN: python -m src.run_phaseX in terminal, X being the phase.
+
 Phase 2:
 
 1. Entry fill: if we're FLAT and a signal was queued on the previous bar, open a position at bar i's open price. Side = LONG or SHORT per the queued signal. State → ENTERED.

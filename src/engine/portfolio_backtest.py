@@ -28,6 +28,7 @@ class Trade:
     entry_price: float
     exit_bar_idx: int
     exit_price: float
+    reason: str  # "TP" | "SL" | "WA" (forced close when the vol estimate drops out)
 
     @property
     def pnl(self) -> float:
@@ -41,8 +42,19 @@ class Trade:
 
 
 @dataclass
+class WeightAdjustment:
+    """A daily rebalance that resized an already-open position without closing it."""
+
+    symbol: str
+    side: Side
+    bar_idx: int
+    weight: float
+
+
+@dataclass
 class PortfolioBacktestResult:
     trades: list[Trade] = field(default_factory=list)
+    weight_adjustments: list[WeightAdjustment] = field(default_factory=list)
     equity_curve: pd.Series = field(default_factory=pd.Series)
     weights_history: pd.DataFrame = field(default_factory=pd.DataFrame)
 
@@ -93,6 +105,7 @@ def run_portfolio_backtest(
     current_weights = {s: 0.0 for s in symbols}
 
     trades: list[Trade] = []
+    weight_adjustments: list[WeightAdjustment] = []
     equity = [0.0] * T
     weights_rows = []
     prev_date = None
@@ -101,6 +114,21 @@ def run_portfolio_backtest(
         eq = cash
         for s in symbols:
             eq += shares[s] * aligned[s]["close"].iloc[i]
+        return eq
+
+    def equity_for_sizing(i: int) -> float:
+        """
+        Portfolio equity as of the last known close, for sizing a trade that
+        fills at bar i's open. Using aligned[s]["close"].iloc[i] here would
+        value existing positions off a close that hasn't happened yet at the
+        moment of the open fill - a lookahead leak. Bar 0 has no prior close,
+        but shares are still all 0 at that point, so cash alone is correct.
+        """
+        if i == 0:
+            return cash
+        eq = cash
+        for s in symbols:
+            eq += shares[s] * aligned[s]["close"].iloc[i - 1]
         return eq
 
     for i in range(T):
@@ -118,7 +146,7 @@ def run_portfolio_backtest(
             current_weights = {s: weights_today.get(s, 0.0) for s in symbols}
             weights_rows.append({"date": today, **current_weights})
 
-            eq = current_equity(i)
+            eq = equity_for_sizing(i)
             for s in symbols:
                 if state[s] is State.ENTERED and position[s] is not None:
                     open_price = aligned[s]["open"].iloc[i]
@@ -138,6 +166,7 @@ def run_portfolio_backtest(
                                 entry_price=position[s].entry_price,
                                 exit_bar_idx=i,
                                 exit_price=open_price,
+                                reason="WA",
                             )
                         )
                         position[s] = None
@@ -149,6 +178,9 @@ def run_portfolio_backtest(
                     delta = target_shares - shares[s]
                     cash -= delta * open_price
                     shares[s] = target_shares
+                    weight_adjustments.append(
+                        WeightAdjustment(symbol=s, side=position[s].side, bar_idx=i, weight=weight)
+                    )
 
         for s in symbols:
             df_s = aligned[s]
@@ -160,7 +192,7 @@ def run_portfolio_backtest(
                 side = Side.LONG if pending_signal[s] is Signal.LONG else Side.SHORT
                 weight = current_weights[s]
                 if weight > 0:
-                    eq = current_equity(i)
+                    eq = equity_for_sizing(i)
                     side_sign = 1 if side is Side.LONG else -1
                     target_shares = side_sign * weight * eq / open_price
                     delta = target_shares - shares[s]
@@ -177,9 +209,12 @@ def run_portfolio_backtest(
 
             if state[s] is State.ENTERED and position[s] is not None:
                 held_bars = i - position[s].entry_bar_idx
-                if held_bars >= min_holding_bars and strategy.exit_rule.should_exit(
-                    history, position[s]
-                ):
+                reason = (
+                    strategy.exit_rule.exit_reason(history, position[s])
+                    if held_bars >= min_holding_bars
+                    else None
+                )
+                if reason:
                     delta = 0.0 - shares[s]
                     cash -= delta * close_price
                     shares[s] = 0.0
@@ -191,6 +226,7 @@ def run_portfolio_backtest(
                             entry_price=position[s].entry_price,
                             exit_bar_idx=i,
                             exit_price=close_price,
+                            reason=reason,
                         )
                     )
                     position[s] = None
@@ -208,4 +244,9 @@ def run_portfolio_backtest(
     weights_history = (
         pd.DataFrame(weights_rows).set_index("date") if weights_rows else pd.DataFrame()
     )
-    return PortfolioBacktestResult(trades=trades, equity_curve=equity_curve, weights_history=weights_history)
+    return PortfolioBacktestResult(
+        trades=trades,
+        weight_adjustments=weight_adjustments,
+        equity_curve=equity_curve,
+        weights_history=weights_history,
+    )

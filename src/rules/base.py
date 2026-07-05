@@ -39,8 +39,16 @@ class EntryRule(ABC):
 
 class ExitRule(ABC):
     @abstractmethod
+    def exit_reason(self, history: pd.DataFrame, position: Position) -> str | None:
+        """
+        Decide whether an open position should be closed on the current bar.
+
+        Returns a short reason code (e.g. "TP"/"SL") if it should, otherwise
+        None. Concrete reason codes are defined by each rule implementation.
+        """
+
     def should_exit(self, history: pd.DataFrame, position: Position) -> bool:
-        """Decide whether an open position should be closed on the current bar."""
+        return self.exit_reason(history, position) is not None
 
 
 class ReentryRule(ABC):
