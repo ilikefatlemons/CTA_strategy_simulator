@@ -10,9 +10,10 @@ driven by whatever bar is under the cursor.
 """
 
 from collections import defaultdict
+from typing import cast
 
 import pandas as pd
-from lightweight_charts import Chart
+from lightweight_charts import AbstractChart, Chart
 
 from src.engine.portfolio_backtest import Trade, WeightAdjustment
 from src.rules.base import Side
@@ -48,6 +49,36 @@ def _ohlc(df: pd.DataFrame) -> pd.DataFrame:
     out = df[cols].rename(columns={"timestamp": "time"})
     out["time"] = _to_ns(out["time"])
     return out
+
+
+def _macd_series(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal_period: int = 9) -> pd.DataFrame:
+    """Same formula as rules.entry.MACDGoldenCross, but the full series (for
+    charting) rather than just the last two bars (for signal detection)."""
+    closes = df["close"]
+    ema_fast = closes.ewm(span=fast, adjust=False).mean()
+    ema_slow = closes.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+    return pd.DataFrame(
+        {
+            "time": _to_ns(df["timestamp"]),
+            "macd": macd_line,
+            "signal": signal_line,
+            "histogram": macd_line - signal_line,
+        }
+    )
+
+
+def _atr_series(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    """Same formula as rules.exit.atr, but the full rolling series (for
+    charting) rather than just the latest value (for exit-rule evaluation)."""
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    atr = true_range.rolling(period).mean()
+    return pd.DataFrame({"time": _to_ns(df["timestamp"]), "atr": atr})
 
 
 def _by_symbol(items: list) -> dict[str, list]:
@@ -113,7 +144,7 @@ def _build_stats_table(chart: Chart, sharpe_stats: dict[str, float], portfolio_r
         # regardless of whether func is set. Without a func, its callbackName
         # stays null and clicking fires "null_~_<rowId>" back to python -
         # there's no handler named "null", so that KeyError crashes the app.
-        func=lambda row: None,
+        func=lambda _row: None,
     )
     table.new_row("Portfolio Return", f"{portfolio_return:.2%}")
     for symbol, sharpe in sharpe_stats.items():
@@ -215,7 +246,7 @@ def _build_weight_pie(chart: Chart, symbols: list[str]) -> list[str]:
     return colors
 
 
-def _build_return_title(chart: Chart, equity_chart: Chart) -> None:
+def _build_return_title(chart: AbstractChart, equity_chart: AbstractChart) -> None:
     chart.run_script(
         f"""
         {equity_chart.id}.returnTitle = document.createElement('div')
@@ -233,7 +264,7 @@ def _build_return_title(chart: Chart, equity_chart: Chart) -> None:
     )
 
 
-def _wire_return_legend(equity_chart: Chart, bar_return_hist) -> None:
+def _wire_return_legend(equity_chart: AbstractChart, bar_return_hist) -> None:
     """
     Mirrors the main chart's top-left OHLCV legend, but for this pane's
     per-bar return: a small text box, top-left, updated on hover, colored
@@ -268,8 +299,8 @@ def _wire_return_legend(equity_chart: Chart, bar_return_hist) -> None:
 
 
 def _wire_weight_hover(
-    chart: Chart,
-    equity_chart: Chart,
+    chart: AbstractChart,
+    equity_chart: AbstractChart,
     weights_history: pd.DataFrame,
     symbols: list[str],
     pie_colors: list[str],
@@ -285,20 +316,22 @@ def _wire_weight_hover(
     per-symbol weights.
     """
     handler_name = f"wa_hover_{chart.id.rsplit('.', 1)[-1]}"
-    state = {"last_date": None}
+    state: dict[str, object] = {"last_date": None}
 
     def on_move(time_str):
         if time_str in (None, "null", "undefined", ""):
             return
         try:
-            date = pd.Timestamp(int(float(time_str)), unit="s", tz="UTC").date()
+            hovered_date = pd.Timestamp(int(float(time_str)), unit="s", tz="UTC").date()
         except (TypeError, ValueError):
             return
-        if date == state["last_date"] or date not in weights_history.index:
+        if hovered_date == state["last_date"] or hovered_date not in weights_history.index:
             return
-        state["last_date"] = date
+        state["last_date"] = hovered_date
 
-        day_weights = weights_history.loc[date]
+        day_weights = cast(
+            "dict[str, float]", cast(pd.Series, weights_history.loc[hovered_date]).to_dict()
+        )
 
         cum = 0.0
         stops = []
@@ -346,8 +379,11 @@ def show_portfolio_backtest(
     # The library's own default window is 800x600 - too small for this grid
     # to stay legible, and a "restore down" from maximized falls back to it.
     # Open large enough from the start that the restored size still fits.
+    # Left column height is split 0.6 main / 0.2 MACD / 0.2 ATR so the two
+    # indicator subcharts (added below) have room to stack under the main
+    # candlestick chart without encroaching on the right column.
     chart = Chart(
-        title="Strategy Backtest Terminal", toolbox=True, inner_width=0.5, inner_height=1.0,
+        title="Strategy Backtest Terminal", toolbox=True, inner_width=0.5, inner_height=0.6,
         width=1600, height=1000, maximize=True,
     )
     chart.legend(visible=True, font_size=16, font_family=UI_FONT)
@@ -365,6 +401,95 @@ def show_portfolio_backtest(
     # by default (no axis) - without a visible axis there's nowhere for the
     # crosshair to attach a value label, so it never shows one on hover.
     chart.run_script(f'{chart.id}.chart.priceScale("volume_scale").applyOptions({{visible: true}})')
+
+    # Left column, below the main chart: MACD and ATR indicator panes, each
+    # toggleable from the topbar. sync_crosshairs_only=False so the timescale
+    # (zoom/pan), not just the crosshair, stays in lockstep with the main
+    # chart in both directions. Hidden by default (display: none) until
+    # their topbar button is toggled.
+    macd_chart = chart.create_subchart(
+        position="left", width=0.5, height=0.2, sync=True, sync_crosshairs_only=False
+    )
+    macd_chart.time_scale(time_visible=True, seconds_visible=False, border_visible=True)
+    macd_chart.crosshair(mode="magnet")
+    macd_line = macd_chart.create_line("macd", color=OPEN_COLOR)
+    signal_line = macd_chart.create_line("signal", color=WA_COLOR)
+    macd_hist = macd_chart.create_histogram("histogram", color=TP_COLOR, scale_margin_top=0.8, scale_margin_bottom=0.0)
+    # The library lays every pane out with CSS float, which packs each new
+    # float into whatever gap is free first rather than strictly under the
+    # element above it - with the right column (equity/table/pie) appended
+    # later in the DOM, the space beside the (now-shorter) main chart is
+    # still empty when this pane is created, so it floats up into the right
+    # column instead of sitting below the main chart, pushing the real right
+    # column content down. Taking it out of the float flow entirely with a
+    # pinned position leaves the main/equity/table/pie layout untouched.
+    macd_chart.run_script(
+        f"""
+        {macd_chart.id}.wrapper.style.float = 'none'
+        {macd_chart.id}.wrapper.style.position = 'absolute'
+        {macd_chart.id}.wrapper.style.left = '0%'
+        {macd_chart.id}.wrapper.style.display = 'none'
+        """
+    )
+
+    atr_chart = chart.create_subchart(
+        position="left", width=0.5, height=0.2, sync=True, sync_crosshairs_only=False
+    )
+    atr_chart.time_scale(time_visible=True, seconds_visible=False, border_visible=True)
+    atr_chart.crosshair(mode="magnet")
+    atr_line = atr_chart.create_line("atr", color=OPEN_COLOR)
+    atr_chart.run_script(
+        f"""
+        {atr_chart.id}.wrapper.style.float = 'none'
+        {atr_chart.id}.wrapper.style.position = 'absolute'
+        {atr_chart.id}.wrapper.style.left = '0%'
+        {atr_chart.id}.wrapper.style.display = 'none'
+        """
+    )
+
+    def _set_macd(df: pd.DataFrame) -> None:
+        macd_df = _macd_series(df)
+        macd_line.set(macd_df[["time", "macd"]])
+        signal_line.set(macd_df[["time", "signal"]])
+        hist_df = macd_df[["time", "histogram"]].copy()
+        hist_df["color"] = [TP_COLOR if v >= 0 else SL_COLOR for v in hist_df["histogram"]]
+        macd_hist.set(hist_df)
+
+    def _set_atr(df: pd.DataFrame) -> None:
+        atr_line.set(_atr_series(df))
+
+    # Indicator panes stack in the order they were opened - whichever is
+    # toggled on first takes the slot right below the main chart, and a
+    # second one opened afterwards lands below that. Closing one and
+    # reopening it later re-appends it to the end of this list, so it drops
+    # below any pane that's stayed open the whole time.
+    indicator_charts = {"macd": macd_chart, "atr": atr_chart}
+    open_order: list[str] = []
+    PANE_TOPS = ("60%", "80%")
+
+    def _reposition_panes() -> None:
+        for i, key in enumerate(open_order):
+            pane = indicator_charts[key]
+            pane.run_script(f"{pane.id}.wrapper.style.top = '{PANE_TOPS[i]}'")
+
+    def _make_toggle(key: str, widget_name: str):
+        sub_chart = indicator_charts[key]
+
+        def on_toggle(c):
+            visible = c.topbar[widget_name].value
+            if key in open_order:
+                open_order.remove(key)
+            if visible:
+                open_order.append(key)
+            sub_chart.run_script(
+                f"{sub_chart.id}.wrapper.style.display = '{{}}'".format("block" if visible else "none")
+            )
+            _reposition_panes()
+
+        return on_toggle
+
+    chart.topbar.button("macd_toggle", "MACD", toggle=True, func=_make_toggle("macd", "macd_toggle"))
+    chart.topbar.button("atr_toggle", "ATR", toggle=True, func=_make_toggle("atr", "atr_toggle"))
 
     # Top-right quadrant: portfolio return (equity + drawdown).
     equity_chart = chart.create_subchart(
@@ -411,11 +536,19 @@ def show_portfolio_backtest(
         chart.set(_ohlc(aligned[symbol]))
         _set_markers(chart, aligned[symbol], trades_by_symbol[symbol], weight_adjustments_by_symbol[symbol])
         chart.fit()
+        _set_macd(aligned[symbol])
+        _set_atr(aligned[symbol])
+        macd_chart.fit()
+        atr_chart.fit()
 
     chart.topbar.switcher("symbol", tuple(symbols), default=symbols[0], func=on_symbol_change)
 
     chart.set(_ohlc(aligned[symbols[0]]))
     _set_markers(chart, aligned[symbols[0]], trades_by_symbol[symbols[0]], weight_adjustments_by_symbol[symbols[0]])
     chart.fit()
+    _set_macd(aligned[symbols[0]])
+    _set_atr(aligned[symbols[0]])
+    macd_chart.fit()
+    atr_chart.fit()
 
     chart.show(block=True)
