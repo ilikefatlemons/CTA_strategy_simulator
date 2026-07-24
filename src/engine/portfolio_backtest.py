@@ -101,6 +101,7 @@ def run_portfolio_backtest(
     state = {s: State.FLAT for s in symbols}
     position: dict[str, Position | None] = {s: None for s in symbols}
     pending_signal = {s: Signal.NONE for s in symbols}
+    pending_flip = {s: Signal.NONE for s in symbols}
     bars_since_exit = {s: 0 for s in symbols}
     current_weights = {s: 0.0 for s in symbols}
 
@@ -202,6 +203,42 @@ def run_portfolio_backtest(
                     state[s] = State.ENTERED
                 pending_signal[s] = Signal.NONE
 
+            elif state[s] is State.ENTERED and position[s] is not None and pending_flip[s] is not Signal.NONE:
+                # Close on the reverse signal and immediately open the
+                # reversed position at the same price/bar (from_flip=True).
+                # That reversed position stays locked from its own exit_rule
+                # and re-flip checks until it clears the full reentry
+                # cooldown (see the gates below) - same protection a normal
+                # close -> cooldown -> reentry cycle would have given it.
+                flip_side = Side.LONG if pending_flip[s] is Signal.LONG else Side.SHORT
+                delta = 0.0 - shares[s]
+                cash -= delta * open_price
+                shares[s] = 0.0
+                trades.append(
+                    Trade(
+                        symbol=s,
+                        side=position[s].side,
+                        entry_bar_idx=position[s].entry_bar_idx,
+                        entry_price=position[s].entry_price,
+                        exit_bar_idx=i,
+                        exit_price=open_price,
+                        reason="FLIP",
+                    )
+                )
+                weight = current_weights[s]
+                if weight > 0:
+                    eq = equity_for_sizing(i)
+                    side_sign = 1 if flip_side is Side.LONG else -1
+                    target_shares = side_sign * weight * eq / open_price
+                    cash -= (target_shares - shares[s]) * open_price
+                    shares[s] = target_shares
+                    position[s] = Position(side=flip_side, entry_price=open_price, entry_bar_idx=i, from_flip=True)
+                else:
+                    position[s] = None
+                    state[s] = State.COOLDOWN
+                    bars_since_exit[s] = 0
+                pending_flip[s] = Signal.NONE
+
             elif state[s] is State.COOLDOWN:
                 bars_since_exit[s] += 1
                 if strategy.reentry_rule.can_reenter(history, bars_since_exit[s]):
@@ -209,9 +246,13 @@ def run_portfolio_backtest(
 
             if state[s] is State.ENTERED and position[s] is not None:
                 held_bars = i - position[s].entry_bar_idx
+                cleared_min_hold = held_bars >= min_holding_bars
+                cleared_flip_cooldown = (
+                    not position[s].from_flip or strategy.reentry_rule.can_reenter(history, held_bars)
+                )
                 reason = (
                     strategy.exit_rule.exit_reason(history, position[s])
-                    if held_bars >= min_holding_bars
+                    if cleared_min_hold and cleared_flip_cooldown
                     else None
                 )
                 if reason:
@@ -237,6 +278,15 @@ def run_portfolio_backtest(
                 signal = strategy.entry_rule.on_bar(history)
                 if signal is not Signal.NONE and i + 1 < T:
                     pending_signal[s] = signal
+
+            elif state[s] is State.ENTERED and position[s] is not None:
+                held_bars = i - position[s].entry_bar_idx
+                if held_bars >= min_holding_bars and strategy.reentry_rule.can_reenter(history, held_bars):
+                    signal = strategy.entry_rule.on_bar(history)
+                    if signal is not Signal.NONE and i + 1 < T:
+                        signal_side = Side.LONG if signal is Signal.LONG else Side.SHORT
+                        if signal_side is not position[s].side:
+                            pending_flip[s] = signal
 
         equity[i] = current_equity(i)
 

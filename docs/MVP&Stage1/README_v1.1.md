@@ -1,0 +1,90 @@
+# CTA 系统化交易平台 — v1.1 项目计划书（多时间维度）
+
+> Status: **Planning phase — no code has been written yet.**
+> v1.0 = `README_MVP.md` 中完成的 Phase 0-5（单一5分钟时间框架，端到端闭环已跑通）。
+> v1.1 在 v1.0 基础上加一个能力：**引入更大时间维度（15m/30m/1h）的指标去过滤/确认5分钟维度的入场出场信号**，同时保证不引入未来函数。
+
+---
+
+## 1. 目标 (Objective)
+
+v1.0 的入场/出场规则（MACD金叉、ATR TP/SL）全部算在5分钟K线上。v1.1 要验证：**用更大周期的趋势/波动率指标去过滤5分钟信号，是否能提升策略质量**（减少噪音信号、更贴合CTA"顺大势做小周期"的常见做法）。
+
+核心约束（比v1.0多一条，且是本次最容易踩坑的地方）：
+
+- **执行标准一致**：延续v1.0——所有标的同一套规则实例。
+- **严禁未来函数（本phase的核心风险点，但边界不是"必须等大周期K线收盘"）**：真正的红线是**不能用还没打印出来的5分钟bar**，不是"不能用正在形成中的大周期K线"——这两者是两回事，v1.1第一版实现曾经把它们混为一谈（细节见3.2节的修正记录）。允许用当前正在形成中的15m/30m/1h蜡烛去算指标（像任何实时图表的"当前K线"一样，随每根新5m bar持续刷新），只要这根蜡烛的open/high/low/close始终只由**已经发生**的5分钟bar算出来。这样做的意义是"用大周期公式、但5分钟颗粒度响应"：比如15分钟MACD histogram在大周期K线走到一半时就穿越零轴，用live版本能在那一刻（提前于15分钟K线正式收盘）就捕捉到，而不是傻等到收盘那一刻才后知后觉。
+- **信号发出方式不变**：所有entry/exit信号依然逐根5分钟bar判断、下一根5分钟bar开盘成交——大周期指标只是**新增的过滤条件**，不改变原有"bar-by-bar, 5m 粒度"的执行节奏。
+- **可视化验证增强**：左侧图表能在 5m/15m/30m/1h 四个时间维度间切换查看K线+指标（纯展示层面的多周期蜡烛图），并明确标出实际发生的entry/exit价格点（蓝色=entry，红色=exit），方便肉眼核对"大周期指标该确认的时候有没有真的确认"。
+
+---
+
+## 2. 范围与非目标 (Scope / Non-goals)
+
+**In scope (v1.1):**
+- 从现有5分钟CSV**合成**15m/30m/1h K线（不需要重新抓取数据——5分钟是最细粒度，其余周期都是它的整数倍：15m=3根5m，30m=6根5m，1h=12根5m，可以直接resample）
+- 一个"已收盘大周期K线"访问器：给定当前5分钟bar的index，返回**该时刻能看到的最新一根已收盘**的15m/30m/1h K线（严禁用当前正在形成中的那根）
+- 大周期MACD/ATR指标计算（复用v1.0 `MACDGoldenCross`/`ATRTakeProfitStopLoss`里的公式，只是输入换成合成后的大周期K线）
+- 一种可插拔的"多周期过滤"接入方式：v1.0的`EntryRule`/`ExitRule`接口不变，新增一层"大周期确认"逻辑包装在外层（具体过滤规则——比如"只在15m MACD也是多头排列时才允许5m金叉入场"——下一步单独讨论定细节，本phase先把"能不能拿到干净、不偷看未来的大周期数据"这件事做对）
+- 前端：左半区新增4个时间维度切换按钮（5m/15m/30m/1h），点击后左侧蜡烛图（含下方MACD/ATR indicator面板）重新渲染成对应周期的合成K线
+- 前端：entry用蓝色圆点、exit用红色圆点标在K线图上（与v1.0已有的TP/SL/WA箭头marker并存，或替换——待前端phase时确认视觉是否冲突）
+
+**Out of scope（v1.1不做）：**
+- 大周期过滤规则本身的具体交易逻辑设计（比如"多头排列"怎么定义）——这是v1.1做完基础设施后，作为v1.2或后续迭代单独讨论
+- 抓取15m/30m/1h的真实独立数据源（用合成K线足够，且能保证和5m数据完全对齐，没有"两份数据源时间戳对不齐"的问题）
+- 更多时间维度（比如4h/日线）——先验证4档够不够用
+
+---
+
+## 3. 关键设计点：如何避免未来函数
+
+这是v1.1唯一的高风险环节，详细说明：
+
+### 3.1 大周期K线的合成
+用pandas `resample`（比如`resample('15min')`）对5分钟OHLCV做标准聚合（open取第一根、high取最大、low取最小、close取最后一根、volume求和），得到完整的历史15m/30m/1h K线序列。这一步本身没有未来函数问题——它只是"重新分组"，产出的是完整历史。
+
+### 3.2 两种设计的取舍（含一次修正记录）
+
+**第一版实现（Phase B/C draft 1，已废弃）**：在5m回测主循环的第 i 根bar上，只允许访问**结束时间 <= 第i根5m bar的开盘时间**的大周期K线中最新的一根，也就是"永远只用上一根已完全收盘的大周期K线"，指标值在同一根大周期K线覆盖的3/6/12根5m bar上保持完全不变，直到收盘那一刻才跳变一次（"阶梯状"）。写了`latest_closed_bar(higher_tf_df, current_5m_open_time)`访问器和边界单元测试（15m K线刚好在某根5m bar收盘的那一刻，前后各查一次index），逻辑本身没有未来函数问题——但这不是我们想要的行为：它比必要的更保守，会把一个15分钟维度里其实已经成立的信号，硬生生拖到这根15分钟K线正式收盘才承认，白白损失掉本可以更早捕捉到的alpha。`latest_closed_bar`作为一个正确、独立可用的工具函数保留在`src/data/resample.py`里，但当前的指标计算不再用它。
+
+**实际采用的版本（"live forming candle"）**：在第 i 根5m bar上，用**当前正在形成中**的大周期K线（用截至第i根5m bar为止、属于同一个大周期窗口的所有5m bar聚合出来的open/high/low/close）去算指标，每根5m bar都重新算一次——这根蜡烛会随着5分钟bar不断刷新，直到窗口结束才变成一根"定型"的历史K线。这完全不违反"不能用未来函数"的红线：第i根bar上这根蜡烛的O/H/L/C，构成它的5m bar全都是$\\le i$，从未碰到任何还没打印的数据。变化的只是"什么时候能看到某个大周期信号"，而不是"允许看到多少数据"。
+
+实现上用增量EWM更新（`src/data/higher_tf_indicators.py`的`live_higher_tf_indicators`）：维护"上一根**已收盘**大周期K线"收盘时的EMA/signal状态，每根5m bar只需要用当前窗口的实时收盘价做一步EWM递推（`ema_t = alpha*x_t + (1-alpha)*ema_{t-1}`），而不是每根bar都重新跑一遍整段历史的`ewm()`——效率高，而且天然保证"过去的状态永远不受未来影响"。ATR同理：拿"上一根已收盘K线"往前数`atr_period-1`根的true range，加上当前窗口截至此刻的true range，取滚动平均。
+
+### 3.3 验证方法
+放弃了"阶梯状"检查（那是第一版设计的产物，现在指标本来就该逐bar变化，不该是阶梯）。改用三层验证（见`src/run_phaseC.py`）：
+1. **截断不变性（真正的"无未来函数"证明）**：把整段5m序列在任意位置截断，重新跑一遍`live_higher_tf_indicators`，截断点之前的每一个值都必须和用完整序列跑出来的值逐bit一致——如果截断"未来"的bar会改变过去的值，就说明某处偷看了未来。
+2. **自洽性检查**：在每个大周期窗口的最后一根5m bar上（此时forming蜡烛的OHLC已经等同于最终收盘的OHLC），live版本算出来的值必须和`src/indicators.py`里对完整resample序列直接算出来的值完全一致——这是两条不同代码路径在同一个时间点上必须给出同一个答案。
+3. **Prefire演示**：打印同一个15分钟窗口里逐根5m bar的histogram值，确认它确实随每根5m bar变化（而不是3根bar完全相同、第4根才跳变），直观对应你举的12:00/12:05/12:10例子。
+
+---
+
+## 4. 建议的构建顺序 (Build Order)
+
+1. **Phase A**：K线合成器 —— 从5m CSV resample出15m/30m/1h完整历史序列，验证OHLCV聚合正确（跟手工核对几根K线）✅ 已完成（`src/data/resample.py`: `resample_ohlcv`/`resample_all_timeframes`；`src/run_phaseA.py`验证）
+2. **Phase B**：`latest_closed_bar` 访问器 + 单元测试 —— 专门测试边界情况 ✅ 已完成，但**设计已被Phase C取代**（见3.2节）：函数本身正确、保留在`src/data/resample.py`作为独立工具，只是最终的指标计算不再用"永远等收盘"这个策略
+3. **Phase C**：大周期MACD/ATR指标 —— 改用"live forming candle"设计（3.2节），逐5m bar增量更新而非等收盘 ✅ 已完成（`src/indicators.py`: 抽出可复用的全序列MACD/ATR公式；`src/data/higher_tf_indicators.py`: `live_higher_tf_indicators`增量实现；`src/run_phaseC.py`: 截断不变性+自洽性+prefire演示三层验证）
+4. **Phase D（设计已升级，不再是纯展示）**：一开始的计划是"左半区加4个时间维度切换按钮，点击后重新渲染成对应周期的合成K线"，décision逻辑仍然只在5m——但讨论后发现这低估了大周期指标的意义：既然15m图上用的就是15m自己的MACD/ATR，那这就不是"同一个策略换皮肤"，而是**4个真正独立的策略变体**。所以Phase D实际做的是（相当于把原计划的Phase F提前、且改成"完全替换"而不是"过滤器叠加"）：
+   - `src/rules/higher_tf.py`：新增`HigherTFMACDGoldenCross`/`HigherTFATRTakeProfitStopLoss`，进出场信号完全由指定大周期的live MACD/ATR驱动（不是5m+大周期都要满足的过滤器），执行颗粒度仍是5m bar-by-bar（沿用v1.0引擎，未改一行`engine/`代码）
+   - `src/run_phaseD.py`：跑4次独立的`run_portfolio_backtest`（5m用v1.0原版规则，15m/30m/1h用上面的新规则+对应`live_higher_tf_indicators`），每个变体各自的trades/equity/Sharpe/weights完全独立
+   - `src/viz/chart.py`的`show_multi_timeframe_backtest`：左边4行（每行=一个timeframe变体的K线+MACD+ATR，MACD/ATR保留成独立小图而非隐藏，跨timeframe的子图之间只做crosshair联动、不做logical-range联动——因为bar颗粒度不同，联动index range会对不上真实时间窗口），右边对应4行（每个变体自己的Return曲线+Sharpe+权重饼图，合并成一个紧凑区块，因为4个变体的结果真的不一样，不是重复内容）✅ 已完成（`python -m src.run_phaseD`）
+   - 5m/15m/30m/1h实测结果确实各不相同（trade数、Sharpe都不同），验证了这4块显示的是4次真实独立回测，不是同一份交易换皮肤
+5. **Phase E**：前端entry/exit价格点标记——蓝色圆点标entry，红色圆点标exit，叠加或替换现有的TP/SL/WA箭头marker（视觉效果到时候一起看）
+6. **Phase F**：已随Phase D完成"完全替换"这个版本；"5m信号+大周期确认"这种过滤器叠加式的变体，如果之后还想要，可以作为`src/rules/higher_tf.py`的另一个规则类单独加，不影响现有两种规则
+
+每个phase结束后一起看结果、确认再继续，跟v1.0节奏一样。
+
+---
+
+## 5. 对v1.0既有代码的影响
+
+- `src/engine/backtest.py`, `src/engine/portfolio_backtest.py`：完全未改——4个变体复用同一套引擎，靠传入不同的`Strategy(entry_rule=..., exit_rule=...)`区分，不是分叉引擎逻辑
+- `src/rules/entry.py`, `src/rules/exit.py`：未改，是5m变体本身；新增`src/rules/higher_tf.py`作为并列的新规则类，不修改老类
+- `src/viz/chart.py`：`show_portfolio_backtest`（v1.0单时间维度视图，`src/run_phase5.py`用）保持原样；新增`show_multi_timeframe_backtest`（`src/run_phaseD.py`用）。`_set_markers`加了一个可选的`marker_time`参数（不传时行为不变），供高周期面板把marker时间对齐到对应大周期K线
+- v1.0的MVP结论（组合Sharpe -0.61等）不受影响——v1.1是新增能力，不是重跑v1.0
+
+---
+
+## Next step
+
+确认第3节"避免未来函数"的设计思路没问题，然后从 **Phase A（K线合成器）** 开始动手写代码。

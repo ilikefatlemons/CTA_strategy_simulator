@@ -9,7 +9,7 @@ timestamp, symbol, sector, open, high, low, close, volume.
 import os
 
 import pandas as pd
-from alpaca.data.enums import DataFeed
+from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.models.bars import BarSet
 from alpaca.data.requests import StockBarsRequest
@@ -23,6 +23,16 @@ SYMBOLS = {
     "KO": "Consumer Staples",
     "XOM": "Energy",
     "JPM": "Financials",
+    "UNH": "Healthcare",
+    "NKE": "Consumer Discretionary",
+    "INTC": "Semiconductors",
+    "FCX": "Materials",
+    "DAL": "Industrials",
+    # commodity proxies (Alpaca has no futures data; ETF price tracks the
+    # continuous front-month contract closely enough for this backtest)
+    "USO": "Commodities",  # WTI crude oil
+    "GLD": "Commodities",  # COMEX gold
+    "SLV": "Commodities",  # COMEX silver
 }
 
 TIMEFRAME = TimeFrame(5, TimeFrameUnit.Minute)  # type: ignore[arg-type]  # alpaca-py mis-annotates enum members as `str`
@@ -45,6 +55,7 @@ def fetch_symbol(client: StockHistoricalDataClient, symbol: str, sector: str) ->
         timeframe=TIMEFRAME,
         start=start.to_pydatetime(),
         feed=DataFeed.IEX,  # free-tier data feed
+        adjustment=Adjustment.ALL,  # split + dividend adjusted, avoids fake gaps at corporate actions
     )
     bars = client.get_stock_bars(request)
     assert isinstance(bars, BarSet), f"expected BarSet, got {type(bars)}"

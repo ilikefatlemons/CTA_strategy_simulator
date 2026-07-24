@@ -29,6 +29,12 @@ class Position:
     side: Side
     entry_price: float
     entry_bar_idx: int
+    # True when this position was opened by an immediate flip rather than a
+    # fresh entry - gates exit_rule/re-flip checks behind the full reentry
+    # cooldown (not just min_holding_bars) so a position born from a flip
+    # gets the same cooldown protection a normal close -> cooldown -> reentry
+    # cycle would have given it.
+    from_flip: bool = False
 
 
 class EntryRule(ABC):

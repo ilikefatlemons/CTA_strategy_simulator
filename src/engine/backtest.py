@@ -72,6 +72,7 @@ def run_backtest(
     state = State.FLAT
     position: Position | None = None
     pending_signal: Signal = Signal.NONE
+    pending_flip: Signal = Signal.NONE
     bars_since_exit = 0
     capital = initial_capital
 
@@ -84,6 +85,29 @@ def run_backtest(
             state = State.ENTERED
             pending_signal = Signal.NONE
 
+        elif state is State.ENTERED and position is not None and pending_flip is not Signal.NONE:
+            # Close on the reverse signal and immediately open the reversed
+            # position at the same price/bar. The reversed position still
+            # can't be flipped again until it clears the same cooldown gate
+            # (min_holding_bars + reentry_rule.can_reenter, checked below
+            # when generating the *next* pending_flip) - so a choppy signal
+            # oscillating around zero is rate-limited to once per cooldown,
+            # same as a normal close -> cooldown -> reentry cycle.
+            flip_side = Side.LONG if pending_flip is Signal.LONG else Side.SHORT
+            flip_price = df["open"].iloc[i]
+            trade = Trade(
+                side=position.side,
+                entry_bar_idx=position.entry_bar_idx,
+                entry_price=position.entry_price,
+                exit_bar_idx=i,
+                exit_price=flip_price,
+                reason="FLIP",
+            )
+            trades.append(trade)
+            capital *= 1 + trade.return_pct
+            position = Position(side=flip_side, entry_price=flip_price, entry_bar_idx=i, from_flip=True)
+            pending_flip = Signal.NONE
+
         elif state is State.COOLDOWN:
             bars_since_exit += 1
             if strategy.reentry_rule.can_reenter(history, bars_since_exit):
@@ -91,7 +115,13 @@ def run_backtest(
 
         if state is State.ENTERED and position is not None:
             held_bars = i - position.entry_bar_idx
-            reason = strategy.exit_rule.exit_reason(history, position) if held_bars >= min_holding_bars else None
+            cleared_min_hold = held_bars >= min_holding_bars
+            cleared_flip_cooldown = not position.from_flip or strategy.reentry_rule.can_reenter(history, held_bars)
+            reason = (
+                strategy.exit_rule.exit_reason(history, position)
+                if cleared_min_hold and cleared_flip_cooldown
+                else None
+            )
             if reason:
                 exit_price = df["close"].iloc[i]
                 trade = Trade(
@@ -112,6 +142,15 @@ def run_backtest(
             signal = strategy.entry_rule.on_bar(history)
             if signal is not Signal.NONE and i + 1 < len(df):
                 pending_signal = signal
+
+        elif state is State.ENTERED and position is not None:
+            held_bars = i - position.entry_bar_idx
+            if held_bars >= min_holding_bars and strategy.reentry_rule.can_reenter(history, held_bars):
+                signal = strategy.entry_rule.on_bar(history)
+                if signal is not Signal.NONE and i + 1 < len(df):
+                    signal_side = Side.LONG if signal is Signal.LONG else Side.SHORT
+                    if signal_side is not position.side:
+                        pending_flip = signal
 
         unrealized_return = 0.0
         if state is State.ENTERED and position is not None:
