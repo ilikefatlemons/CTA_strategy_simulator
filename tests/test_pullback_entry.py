@@ -5,21 +5,30 @@ from src.rules.ma_filter import MultiTimeframeFilter
 from src.rules.pullback_entry import MarketSnapshot, PullbackEntryEngine
 
 
-def _trend_klines(direction: str, n: int = 60) -> pd.DataFrame:
-    """A clean, strictly-ordered MA5/20/50 uptrend (or downtrend)."""
+def _trend_klines(direction: str, n: int = 60, bar: int = 0) -> pd.DataFrame:
+    """
+    A clean, strictly-ordered MA5/20/50 uptrend (or downtrend).
+
+    `bar` shifts the whole series forward by that many 2h steps. The cooldown
+    counts *distinct 2h timestamps*, not calls (A5), so a test feeding it
+    successive 2h bars must advance `bar` - otherwise every call carries the
+    same bar and is correctly ignored.
+    """
     step = 1.0 if direction == "long" else -1.0
     closes = [100 + step * i for i in range(n)]
+    stamps = pd.date_range("2024-01-01", periods=n, freq="30min", tz="UTC")
     return pd.DataFrame({
         "open": closes, "high": closes, "low": closes, "close": closes,
-        "timestamp": pd.date_range("2024-01-01", periods=n, freq="30min", tz="UTC"),
+        "timestamp": stamps + pd.Timedelta(hours=2 * bar),
     })
 
 
-def _flat_klines(n: int = 60) -> pd.DataFrame:
+def _flat_klines(n: int = 60, bar: int = 0) -> pd.DataFrame:
     closes = [100.0] * n
+    stamps = pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC")
     return pd.DataFrame({
         "open": closes, "high": closes, "low": closes, "close": closes,
-        "timestamp": pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC"),
+        "timestamp": stamps + pd.Timedelta(hours=2 * bar),
     })
 
 
@@ -103,25 +112,24 @@ def test_cooldown_requires_three_consecutive_stable_bars_to_release():
     guarantees release can never coincide with the triggering bar, and also
     filters out a single-bar flicker/bounce from counting as confirmation.
     """
-    klines_2h = _trend_klines("long")  # bullish array, unchanged throughout
     cooldown = CooldownManager(consecutive_sl_threshold=1, release_confirm_bars=3)
     cooldown.on_trade_closed("long", "SL")
     assert cooldown.is_active() is True
 
     # bias is still the same clean bullish array it always was - one bar of
     # "non-neutral" must NOT be enough to release on its own.
-    cooldown.on_bar(klines_2h)
+    cooldown.on_bar(_trend_klines("long", bar=0))
     assert cooldown.is_active() is True
 
     # a single bar flipping to bearish resets the streak to 1 - still not
-    # enough on its own.
-    cooldown.on_bar(_trend_klines("short"))
+    # enough on its own. Each call is a genuinely later 2h bar (A5).
+    cooldown.on_bar(_trend_klines("short", bar=1))
     assert cooldown.is_active() is True
     # 2 consecutive bearish bars - still short of the 3-bar confirmation.
-    cooldown.on_bar(_trend_klines("short"))
+    cooldown.on_bar(_trend_klines("short", bar=2))
     assert cooldown.is_active() is True
     # 3rd consecutive bearish bar - now confirmed, releases.
-    cooldown.on_bar(_trend_klines("short"))
+    cooldown.on_bar(_trend_klines("short", bar=3))
     assert cooldown.is_active() is False
 
 
@@ -141,11 +149,33 @@ def test_cooldown_neutral_bar_resets_the_stability_streak():
     cooldown.on_bar(extreme_bar)
     assert cooldown.is_active() is True
 
-    cooldown.on_bar(_flat_klines(60))  # neutral - resets the streak
+    cooldown.on_bar(_flat_klines(60, bar=1))  # neutral - resets the streak
     assert cooldown.is_active() is True
-    cooldown.on_bar(_trend_klines("long"))  # bar 1 of a new streak
+    cooldown.on_bar(_trend_klines("long", bar=2))  # bar 1 of a new streak
     assert cooldown.is_active() is True
-    cooldown.on_bar(_trend_klines("long"))  # bar 2
+    cooldown.on_bar(_trend_klines("long", bar=3))  # bar 2
     assert cooldown.is_active() is True
-    cooldown.on_bar(_trend_klines("long"))  # bar 3 - now releases
+    cooldown.on_bar(_trend_klines("long", bar=4))  # bar 3 - now releases
+    assert cooldown.is_active() is False
+
+
+def test_cooldown_does_not_release_on_repeated_same_2h_bar():
+    """
+    A5 regression. The backtest engine calls `on_bar` on every 5m bar, so the
+    same 2h bar arrives ~19.5 times in a row. Those repeats must not advance the
+    release counter - otherwise 3 calls (15 minutes) releases a cooldown that is
+    specified as 3 x 2h bars (6 hours), and the rule is effectively inert.
+    """
+    klines_2h = _trend_klines("long")  # one clean bullish 2h bar, repeated
+    cooldown = CooldownManager(consecutive_sl_threshold=1, release_confirm_bars=3)
+    cooldown.on_trade_closed("long", "SL")
+    assert cooldown.is_active() is True
+
+    for _ in range(50):  # ~4 hours of 5m calls, all carrying that same 2h bar
+        cooldown.on_bar(klines_2h)
+    assert cooldown.is_active() is True
+
+    # three genuinely distinct later 2h bars do release it.
+    for b in (1, 2, 3):
+        cooldown.on_bar(_trend_klines("long", bar=b))
     assert cooldown.is_active() is False

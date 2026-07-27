@@ -37,12 +37,16 @@ class CooldownManager:
     consecutive_sl_threshold: int = 3
     release_confirm_bars: int = 3
     ma_periods: tuple[int, int, int] = (5, 20, 50)
+    # A5: evaluate this rule once per NEW 2h bar rather than once per call.
+    # False = pre-A5 behaviour (counts calls). See src/config.py.
+    count_distinct_2h_bars: bool = True
 
     active: bool = field(default=False, init=False)
     _consecutive_sl: int = field(default=0, init=False)
     _last_sl_direction: str | None = field(default=None, init=False)
     _stable_state: ArrayState | None = field(default=None, init=False)
     _stable_count: int = field(default=0, init=False)
+    _last_2h_ts: object | None = field(default=None, init=False)
 
     def is_active(self) -> bool:
         return self.active
@@ -81,6 +85,17 @@ class CooldownManager:
         return sum(1 for ma in mas if body_low <= ma <= body_high) >= 2
 
     def on_bar(self, klines_2h: pd.DataFrame) -> None:
+        # A5: this is a 2h-timescale rule, but the engine calls it on every 5m
+        # bar (~19.5x per 2h bar), so `_stable_count` used to advance per call -
+        # 3 calls = 15 minutes instead of 3 x 2h = 6 hours - and the
+        # structure-break check re-armed off the same 2h bar right after a
+        # release. Gating the whole body on a new 2h timestamp fixes both.
+        if self.count_distinct_2h_bars:
+            ts = klines_2h["timestamp"].iloc[-1]
+            if ts == self._last_2h_ts:
+                return
+            self._last_2h_ts = ts
+
         if not self.active:
             if self.check_structure_break(klines_2h):
                 self._arm()

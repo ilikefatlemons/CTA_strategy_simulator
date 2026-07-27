@@ -13,11 +13,28 @@ skewing early weights.
 
 import pandas as pd
 
+from src.config import BacktestConfig
 from src.engine.portfolio_pullback_backtest import run_portfolio_pullback_backtest
 from src.viz.chart import show_portfolio_pullback_backtest
 
-SYMBOLS = ["NVDA", "KO", "XOM", "JPM", "UNH", "NKE", "INTC", "FCX", "DAL", "USO", "GLD", "SLV"]
-START, END = "2024-07-18", "2026-07-17"
+# ---------------------------------------------------------------------------
+# Tuning knobs - edit these; nothing below the divider needs to change.
+# Flip the two USE_* flags to False to recover the full backtest.
+# ---------------------------------------------------------------------------
+ALL_SYMBOLS = ["NVDA", "KO", "XOM", "JPM", "UNH", "NKE", "INTC", "FCX", "DAL", "USO", "GLD", "SLV"]
+DEV_SYMBOLS = ["NVDA", "XOM", "GLD"]        # fast subset: one high-vol, one energy, one metal
+USE_DEV_SUBSET = True                       # False -> full 12-ticker universe
+
+FULL_RANGE = ("2024-07-18", "2026-07-17")
+DEV_RANGE = ("2024-07-18", "2024-10-18")    # ~3 months, past the ~2.5-week 2h warm-up
+USE_DEV_RANGE = True                        # False -> full 2-year sample
+
+CONFIG = BacktestConfig()                   # strategy switches (see src/config.py)
+SHOW_CHART = True                           # False -> print metrics only, skip the (blocking) chart
+# ---------------------------------------------------------------------------
+
+SYMBOLS = DEV_SYMBOLS if USE_DEV_SUBSET else ALL_SYMBOLS
+START, END = DEV_RANGE if USE_DEV_RANGE else FULL_RANGE
 
 
 def main():
@@ -27,7 +44,7 @@ def main():
         df = df[(df["timestamp"] >= START) & (df["timestamp"] <= END)].reset_index(drop=True)
         dfs[symbol] = df
 
-    result = run_portfolio_pullback_backtest(dfs)
+    result = run_portfolio_pullback_backtest(dfs, config=CONFIG)
 
     print(f"Portfolio: Return {result.portfolio_return:.2%}, Sharpe {result.portfolio_sharpe:.2f}")
     for symbol in sorted(result.per_ticker):
@@ -37,7 +54,8 @@ def main():
             f"batches {r.n_batches}, winrate {r.win_rate:.1%}"
         )
 
-    show_portfolio_pullback_backtest(dfs, result)
+    if SHOW_CHART:
+        show_portfolio_pullback_backtest(dfs, result)
 
 
 if __name__ == "__main__":

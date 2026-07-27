@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from src.config import BacktestConfig
 from src.engine.pullback_backtest import Trade, run_pullback_backtest
 from src.engine.vol_estimator import daily_closes, rolling_daily_atr_vol
 from src.performance.sharpe import sharpe_ratio
@@ -127,8 +128,8 @@ def _direction_stats(batch_pnls: dict[int, tuple[str, float]], direction: str) -
     return DirectionStats(n_batches=n, win_rate=win_rate, payoff_ratio=payoff_ratio)
 
 
-def _ticker_result(df_5m: pd.DataFrame, initial_capital: float) -> TickerResult:
-    result = run_pullback_backtest(df_5m, initial_capital=initial_capital)
+def _ticker_result(df_5m: pd.DataFrame, initial_capital: float, config: BacktestConfig) -> TickerResult:
+    result = run_pullback_backtest(df_5m, initial_capital=initial_capital, config=config)
     total_return = result.equity_curve.iloc[-1] / result.equity_curve.iloc[0] - 1
     sharpe = sharpe_ratio(result.equity_curve)
     batch_pnls = _batch_pnls(result.trades)
@@ -161,9 +162,11 @@ def _ticker_result(df_5m: pd.DataFrame, initial_capital: float) -> TickerResult:
 
 def run_portfolio_pullback_backtest(
     dfs: dict[str, pd.DataFrame], fee_pct: float = 0.0, initial_capital: float = 10_000.0,
+    config: BacktestConfig | None = None,
 ) -> PortfolioBacktestResult:
+    config = config or BacktestConfig()
     symbols = list(dfs.keys())
-    per_ticker = {s: _ticker_result(dfs[s], initial_capital) for s in symbols}
+    per_ticker = {s: _ticker_result(dfs[s], initial_capital, config) for s in symbols}
 
     daily_returns = {
         s: per_ticker[s].equity_curve.groupby(per_ticker[s].equity_curve.index.date).last().pct_change()

@@ -1,0 +1,320 @@
+# stage2.1_fix_plan.md
+
+**Audience:** Claude Code (terminal), working directly in the strategy repository.
+**Author of spec:** review pass; has not seen the codebase.
+**Status:** authoritative work queue for this stage. Work items in the order given.
+
+---
+
+## 0. Purpose and scope
+
+This is a **correctness pass**, not an improvement pass. Every item below removes a way the backtest reports results better than reality. The expected outcome of completing this queue is that **reported performance goes down**. That is the deliverable.
+
+Eleven items are in scope (Item 3.5 inserted after the initial ten — see §6). One (1.6) is registered but **deferred — do not implement**. Everything else in the broader failure taxonomy is out of scope for this stage.
+
+You have not been given a description of the strategy, and neither had the author of this spec. All "where to look" guidance is therefore pattern-based. **Item 0 is an orientation pass and must complete before any code changes.**
+
+---
+
+## 1. Working protocol — read before touching anything
+
+### 1.1 One item at a time
+
+Do not batch. Each item is a gate:
+
+```
+INVESTIGATE  →  REPORT  →  WAIT FOR APPROVAL  →  IMPLEMENT  →  VERIFY  →  RECORD  →  next item
+```
+
+Do not proceed past REPORT without explicit approval. Do not start item N+1 while item N is unverified.
+
+### 1.2 Every fix goes behind a toggle
+
+Each fix must be independently switchable, defaulting to ON (the honest behaviour), with the old behaviour reachable for comparison. This is not optional cleanliness — it is the only way to measure a fix's isolated effect, and the measurement is the point.
+
+At the end of the queue, all toggles ON is the real strategy.
+
+### 1.3 Never repair a fix
+
+**The single most important instruction in this file.** When a fix causes performance to drop, that drop is a measurement, not a bug. You must not:
+
+- retune any parameter to recover the loss
+- widen a tolerance, threshold, or window
+- add a filter, regime condition, or exclusion that was not there before
+- reinterpret an ambiguous convention in the more flattering direction
+- suggest a "compensating improvement" in the same report as the fix
+
+If a fix reduces the strategy to zero edge, report zero edge. That is a finding of the highest value available at this stage.
+
+### 1.4 No parameter changes during this stage, at all
+
+Zero. Every parameter value you touch becomes a trial that must be counted under item **4.1**, and trials are expensive. If a fix appears to require a parameter change to be implementable, stop and report the conflict instead of choosing a value.
+
+### 1.5 Ambiguity halts, it does not resolve itself
+
+Where the correct convention is unclear — which vendor convention a data source uses, whether an exit is evaluated at close or intrabar, what the intended fill price was — **stop and ask**. Do not pick the interpretation that preserves performance. Do not pick "whichever matches current behaviour," since current behaviour is what is under audit.
+
+### 1.6 Scope discipline
+
+If you find a defect that is real but not on this queue, **log it, do not fix it**. Add it to a running `found_not_fixed.md` with a one-line description and location. Unrequested fixes contaminate the per-item performance deltas.
+
+---
+
+## 2. Global invariants
+
+When the High tier is complete, all of the following must hold, verifiably:
+
+| # | Invariant |
+|---|---|
+| G1 | Every bar carries a timestamp meaning **the moment the bar closed** — the first moment its data was knowable. One convention, applied at ingestion, nowhere else. |
+| G2 | Any value used to make a decision at bar *t* is computable from bars *t*, *t−1*, *t−2*, … and no bar later than *t*. |
+| G3 | An order generated from a decision at bar *t* cannot execute at a price from bar *t*. Earliest execution is bar *t+1*. |
+| G4 | Where the order of intrabar events is unknown, the engine resolves it against the position. |
+| G5 | No indicator, filter, threshold, ranking, or normalisation uses a statistic computed over the full sample. |
+
+Every item below exists to establish one or more of these. State which invariant each change serves in your report.
+
+---
+
+## 3. Metrics ledger
+
+Maintain `fix_ledger.md`. One row per item, recorded **before and after** each fix, on an unchanged data range:
+
+- Total return, CAGR
+- Sharpe (and note the annualisation factor used)
+- Max drawdown
+- Number of trades
+- Win rate
+- Average holding period in bars
+- Average P&L per trade in basis points
+
+Also record, per item: the toggle name, the date, and one sentence on what changed and why.
+
+The ledger is a primary deliverable. A strategy whose edge survives every fix intact is not "robust" — it is a signal that a leak remains undetected, and the ledger is how you would notice.
+
+---
+
+## 4. Priority queue
+
+Priority tiers are set by the project owner. Ordering **within** tiers is set here, on the principle that correctness at each layer is presupposed by the layer above it: **data frame → engine → signal**, and within a layer, mechanical before judgmental.
+
+| Order | ID | Item | Layer | Tier |
+|---|---|---|---|---|
+| — | 0 | Orientation map | — | prerequisite |
+| 1 | 1.1 | Bar timestamp convention | data | HIGH |
+| 2 | 3.2 | Same-bar close fill | engine (entry) | HIGH |
+| 3 | 3.1 | Intrabar path resolution | engine (exit) | HIGH |
+| 3.5 | 3.5 | Gap-through exit fill (A2) | engine (exit) | HIGH |
+| 4 | 2.1 | Confirmation-bar leakage | signal (mechanical) | HIGH |
+| 5 | 2.4 | Context-filter leakage | signal (judgmental) | HIGH |
+| 6 | 1.2 | Split/dividend vs. candle shape | data | MIDDLE |
+| — | 4.1 | Trial ledger | process | MIDDLE — **starts now, runs throughout** |
+| 7 | 2.6 | Warm-up leakage | signal | LOW |
+| 8 | 1.4 | Universe construction | data | LOW |
+| — | 1.6 | Futures contract splicing | data | **DEFERRED — do not implement** |
+
+**Why 1.1 leads.** It defines what "bar *t*" means. Auditing whether a signal only uses bars ≤ *t* is meaningless while the index itself may be shifted. Every later verification is measured in this coordinate system.
+
+**Why engine precedes signal.** Engine fixes change the price of every existing trade; signal fixes change which trades exist. Fixing the engine first means each subsequent signal delta is measured against a stable, honest execution model. Reversing the order produces two overlapping performance drops that cannot be cleanly attributed.
+
+**Why 2.4 is last in the High tier.** It is the only item requiring investigative reading rather than a convention change. It also has the largest expected damage. Doing it last means it is performed against a codebase already known to be correct in its timing and execution.
+
+**Why 4.1 is not sequenced.** It is a record, not an edit. Begin it with the first line of work.
+
+---
+
+## 5. Item 0 — Orientation map (prerequisite, no code changes)
+
+**Objective.** Produce a written map of three boundaries before anything is modified.
+
+Deliver `orientation.md` containing:
+
+1. **Ingestion** — every point where external price data enters. For each: source, bar interval, timestamp field, timezone, and whether the source documents its timestamp convention. Note whether OHLC is adjusted, unadjusted, or unknown.
+2. **Signal computation** — every point where a decision value is produced from price data. For each: which bar index it is assigned to, and the maximum bar index it reads.
+3. **Execution** — every point where an order becomes a fill. For each: the bar index and the OHLC field used as the fill price, and the order type assumed.
+
+Also list every library-provided indicator in use, with its configuration, flagging any that centre, displace, smooth symmetrically, or confirm retroactively.
+
+**Do not fix anything found during this pass.** Log and continue.
+
+---
+
+## 6. HIGH tier
+
+### Item 1 — 1.1 Bar timestamp convention
+
+- **Serves:** G1
+- **Objective:** every bar in the system is stamped with its close time; conversion happens once, at ingestion.
+- **Violation signature:** timestamps normalised in more than one place; different sources assumed to share a convention without verification; mixed instruments whose "daily" bars end at different clock times; any conversion inside strategy logic.
+- **Required change:** normalise at the ingestion boundary only. Strategy code receives one convention and never adjusts for it.
+- **Verification:** select a scheduled, hard-timestamped event (CPI print, FOMC decision, inventory report, session open). Locate the volume/range spike. Confirm it falls inside the bar whose interval *contains* the event, not the preceding bar. Repeat per data source. Record which event and which bar in the report.
+- **Expected effect on results:** if a source was mislabelled, a large drop. If all sources were already correct, **no change at all** — this is a common and acceptable outcome.
+- **Flag if:** results change for a source you have confirmed was already correct. That indicates a second, unrelated defect.
+
+### Item 2 — 3.2 Same-bar close fill
+
+- **Serves:** G3
+- **Objective:** a decision made from the close of bar *t* executes no earlier than the open of bar *t+1*, at that open price.
+- **Violation signature:** any fill price drawn from the same bar index that produced the signal; entry logic reading `close[t]` and assigning a fill of `close[t]`.
+- **Required change:** enforce the *t* → *t+1* separation in the engine, not by shifting signals in strategy code. The engine is the correct place because it applies uniformly.
+- **Permitted exception:** if the intent is a market-on-close order in equities, that is legitimate — but it must be modelled explicitly as an auction price, flagged as a distinct execution mode, and reported. Do not adopt this exception to preserve performance.
+- **Verification:** produce a **lag curve** — full results at entry delays of 0, 1, 2, and 3 bars. Report all four. A real edge decays gradually across the curve. An artefact collapses between 0 and 1.
+- **Expected effect:** meaningful drop. On daily bars, a decline of roughly 20–50% in return is normal and not cause for concern.
+- **Flag if:** the lag curve collapses to zero at lag 1. That is not a fill bug — it means the edge exists only inside an unobservable instant, and the strategy needs re-examination rather than repair.
+
+### Item 3 — 3.1 Intrabar path resolution
+
+- **Serves:** G4
+- **Objective:** when stop and target both fall inside a bar's range, the engine must not assume the favourable ordering.
+- **Violation signature:** exit logic that checks the target before the stop; any branch resolving a both-hit bar in the position's favour; use of `close` to infer which level was reached first.
+- **Required change (this stage):** the pessimistic convention — when both levels lie within `[low[t], high[t]]`, the stop is taken as hit first, unconditionally.
+- **Deliverable alongside the fix:** results under **both** conventions, optimistic and pessimistic. The spread between them is the quantity of interest — it measures how much of the reported result was an assumption.
+- **Explicitly deferred:** resolving exits on a finer bar interval (daily signals, intraday exits). Register it; do not build it now.
+- **Verification:** report the count and percentage of trades where both levels fell inside a single bar. If that share is above roughly 15%, the strategy's exit design is the dominant driver of its results and this should be stated prominently.
+- **Expected effect:** drop proportional to the both-hit share. For tight stops on daily bars this is frequently the largest single loss in the entire queue.
+
+### Item 3.5 — Gap-through exit fill price (A2)
+
+- **Serves:** G4 — the fill is resolved against the position; an order cannot fill at a price the market never traded.
+- **Origin:** narrowed-scope finding "A2", companion to 3.1. Registered as its own item because 3.1 as written covers only intrabar path/ordering (the "A1" half), not the fill price when a bar gaps through the stop.
+- **Objective:** a stop/trailing exit fills at a price that actually traded. When the triggering bar's open has already crossed the stop, the fill is that open, not the better stop line.
+- **Violation signature:** exit fill taken as the exact level regardless of the bar's open — `exit_price = batch.stop_loss`, `exit_price = batch.trailing_stop`. The erased case is narrow: the triggering bar's **open already beyond the stop** — principally **overnight gaps** (held overnight, next session opens through the stop), plus rare intraday news gaps. Intrabar crossings where the stop genuinely traded stay fair at the stop.
+- **Required change:** stop and trailing fills take the worse side — long `exit = min(stop, open)`, short `exit = max(stop, open)`; the chandelier trailing likewise takes the adverse side. **Take-profit is a limit order — keep `exit = trigger`**, no gap benefit. Deliberate asymmetry: stops pay gap slippage, targets do not.
+- **No parameter introduced:** `min`/`max` of values already in the engine; §1.4 is not engaged.
+- **Depends on 3.1:** "intrabar crossings are fair at the stop" holds only if the exit **trigger** is range-based (high/low). If 3.1 leaves the trigger close-only, this item corrects only the gap subset; drawdown suppression from skipped intrabar stop-outs is 3.1's to fix. Same code segment — resolve the two together.
+- **Verification:** count exits whose triggering bar opened beyond the stop (gap fills) as a share of all stop exits; report the fill give-up in basis points. Toggle on/off; report the isolated maxDD and downside-variance change.
+- **Expected effect:** tail losses restored → maxDD and downside variance rise. From portfolio maxDD ≈ −0.8%, the finding author anticipates roughly **−4% to −8%**. If maxDD barely moves, the suppression is coming from the trigger model (3.1), not the fill — that is itself the finding.
+
+### Item 4 — 2.1 Confirmation-bar leakage
+
+- **Serves:** G2
+- **Objective:** no signal assigned to bar *t* may read data from bar *t+1* or later.
+- **Violation signature:** negative shifts; comparisons between a pattern bar and its successor within a signal definition; a "confirmed" pattern retaining the date of the setup bar rather than the confirmation bar; forward-filled or backward-filled series used as decision inputs.
+- **Required change:** confirmation logic is preserved, its **date is moved**. A pattern forming at *t* and confirming at *t+1* produces a signal dated *t+1* and, under G3, executes at *t+2*.
+- **Out of scope:** do not remove confirmation requirements. The rule is not the defect; the bookkeeping is.
+- **Verification:** shift the completed signal series one additional bar forward and re-run. Report the delta. Gradual degradation is expected; collapse indicates the definition was consuming its own outcome bar.
+- **Expected effect:** if leakage was present, a severe drop, often accompanied by win rate falling by 10–25 percentage points. If absent, no change.
+
+### Item 5 — 2.4 Context-filter leakage
+
+- **Serves:** G2, G5
+- **Objective:** every input to a decision at bar *t* is answerable by an observer standing at *t* with no knowledge of the future.
+- **This is a reading task before it is an editing task.** Testing does not reliably surface these defects, because leaked results look plausible.
+- **Where it hides — audit each explicitly:**
+  - centred or symmetric smoothing of any kind
+  - swing highs/lows, pivots, fractals, ZigZag — unanswerable at the time by construction
+  - forward-displaced indicator lines (Ichimoku cloud and similar)
+  - percentile ranks, z-scores, or normalisations computed over the full sample
+  - volatility or liquidity screens computed over the full sample
+  - any hand-specified regime, date range, or exclusion chosen with hindsight
+  - trend/context conditions of the form "pattern is only valid in a downtrend" — audit the downtrend definition, not the pattern
+- **Required change:** replace each with a trailing-window equivalent using only past bars. Where no causal equivalent exists (pivots, ZigZag), the filter must be removed or replaced with a lagged confirmation that pays the delay honestly.
+- **Verification:** for every filter, state in the report the maximum bar index it reads relative to the signal bar. Any value greater than the signal bar is disqualifying. Deliver this as a table covering every filter, with no omissions.
+- **Note on the permutation test:** randomly shuffling a filter and observing a performance collapse does **not** prove leakage — a legitimate causal filter behaves the same way. It only identifies which filter carries the edge, i.e. which one deserves the careful read. Do not use it as evidence of correctness.
+- **Expected effect:** frequently the largest drop in the queue, because the context filter typically carries most of the strategy's discriminating power.
+
+---
+
+## 7. MIDDLE tier
+
+### Item 6 — 1.2 Split/dividend adjustment vs. candle shape
+
+- **Objective:** pattern classification uses as-traded prices; return measurement uses adjusted prices.
+- **Applies to:** equities only. If the current universe contains no equities, mark N/A and skip.
+- **Violation signature:** a single price series serving both classification and P&L; exact equality tests on prices (`open == close`, `high == max(open, close)`); gap rules with no corporate-action exclusion.
+- **Required change:**
+  1. Detect shapes on raw/unadjusted OHLC; compute returns on adjusted.
+  2. Replace every exact price equality with a tolerance tied to tick size or recent range.
+  3. Suppress signals on corporate-action dates — splits, large special dividends, mergers, ticker changes.
+- **Note:** step 2 introduces a tolerance value. Under §1.4 you may not choose it. Report the requirement and the candidate basis (tick size vs. range fraction) and wait.
+- **Verification:** count exact doji in raw vs. adjusted data. Raw should be substantially higher. If adjusted data shows a healthy count, adjustment is not being applied where you believe it is.
+- **Expected effect:** changes pattern counts, possibly substantially, with a smaller and directionally unpredictable effect on returns.
+
+### Item 4.1 — Trial ledger *(process; begins immediately, evaluated at end of stage)*
+
+- **Objective:** a complete, honest count of how many distinct configurations have ever been evaluated.
+- **Start now.** Create `trial_ledger.md` and record, from this point forward, every distinct configuration evaluated: parameter values, pattern variants, thresholds, universes, date ranges, holding periods. **Include configurations that were abandoned** — those are the ones that inflate the count and the ones people forget.
+- **Reconstruct backwards** as far as project history permits. An underestimate stated as an underestimate is useful; a missing number is not.
+- **Also log:** every occasion the out-of-sample segment has been examined, with dates, and whether the strategy was modified afterwards. Modification after inspection converts that segment to in-sample permanently.
+- **At end of stage, report:** trial count N; the number of out-of-sample inspections; and a haircut Sharpe (Deflated Sharpe or Harvey–Liu) alongside the raw figure.
+- **Interpretation rule to state in the report:** the honest figure is the haircut one. Where N cannot be established, halve the reported Sharpe as a placeholder and say so explicitly.
+- **Constraint:** this item generates no code changes to the strategy.
+
+### Item — 1.6 Futures contract splicing — **DEFERRED**
+
+**Do not implement. Register only.**
+
+Futures are not in the current universe. When they are added, the following must be built *before* any futures result is trusted:
+
+- roll rule fixed in advance and documented (calendar-based or volume/open-interest crossover), never selected by backtest outcome
+- rolls modelled as real trades bearing real cost — two spreads, two commissions, each roll
+- signals suppressed across the splice, so no pattern is formed from bars belonging to different contracts
+- adjustment method declared, with its known distortion stated: back-adjusted preserves dollar moves and breaks percentage returns and price levels; ratio-adjusted preserves percentage returns and breaks dollar levels
+
+Add this to `deferred_register.md` with a pointer to this section.
+
+---
+
+## 8. LOW tier
+
+### Item 7 — 2.6 Warm-up leakage
+
+- **Serves:** G5
+- **Objective:** recursive indicators carry no trace of full-sample statistics, and no signal is generated from an under-filled window.
+- **Violation signature:** recursive indicators (EMA, ATR, RSI, MACD) seeded from a full-series mean; rolling windows permitted to emit values before the window is full; no discard period before trading begins.
+- **Required change:** seed from the earliest available bars only; require a full window before a value is treated as valid; discard the opening stretch of the series — on the order of five to ten times the longest lookback — before any trade is permitted.
+- **Why this ranks above 1.4 despite the low tier:** the discarded stretch is the start of the sample, which is where the first training window of any walk-forward sits. Contamination there poisons the fold most likely to be trusted.
+- **Verification:** drop the opening stretch, re-run, compare. Movement beyond what reduced sample size explains indicates warm-up contamination.
+- **Expected effect:** small, concentrated at the start of the sample.
+
+### Item 8 — 1.4 Universe construction
+
+- **Objective:** the universe is defined by a rule evaluated at each historical date, not by a list assembled today.
+- **Applies to:** equities only. Commodities are unaffected — instruments are not selected for survival. Mark N/A if the universe is entirely non-equity.
+- **Violation signature:** a hardcoded ticker list; a universe derived from present-day index membership or present-day market cap; a data source containing no securities that stopped trading.
+- **Required change, in preference order:**
+  1. Point-in-time constituent data, universe reconstructed per date.
+  2. If unavailable: fix the universe using only information available at the *start* of the test window, hold it fixed, and retain losers with their real returns including total loss.
+  3. If neither is achievable with current data: **document the limitation in the results, do not silently proceed.** For this item, a written caveat is an acceptable deliverable.
+- **Verification:** count universe members that fell 70% or more and did not recover. Zero such names means the universe is a survivor list. Additionally, replace the pattern with random entries following any multi-day decline on the same universe — if random entries also profit, the universe is producing the result, not the strategy.
+- **Expected effect:** on a survivor-biased universe, a substantial drop concentrated in long/bullish-reversal signals.
+
+---
+
+## 9. Calibration
+
+Expected cumulative effect of the High tier, from experience with this class of defect: **roughly 30–70% of reported performance removed.** A strategy retaining most of its edge through all five High items is either unusually clean or still leaking somewhere not yet identified — treat that outcome as a prompt to look harder, not as validation.
+
+The following outcomes are **findings to report, not problems to solve**:
+
+- edge disappears entirely after item 2 or item 5
+- win rate falls sharply after item 4
+- the optimistic/pessimistic spread in item 3 exceeds the entire reported profit
+- the trial count in 4.1 turns out to be in the hundreds or thousands
+
+---
+
+## 10. Known failure modes of *this process*
+
+Guard against these in yourself:
+
+1. **Compensating.** Fixing a leak and then, in the same session, adding something that restores the number. Prohibited by §1.3, and it is the most natural mistake to make.
+2. **Favourable ambiguity resolution.** Two readings of a convention are defensible, and the one preserving performance is chosen. Halt instead (§1.5).
+3. **Scope creep.** Fixing an unrequested defect mid-item, making the performance delta uninterpretable. Log it (§1.6).
+4. **Silent tolerance drift.** Widening a threshold "for robustness" while implementing something else. This is a parameter change and is prohibited outright (§1.4).
+5. **Batching.** Two fixes in one pass, leaving both deltas unattributable. The ledger is the deliverable, and batching destroys it.
+6. **Treating a test as proof of absence.** Especially in item 5 — a passing permutation test does not establish that a filter is causal.
+
+---
+
+## 11. Deliverables for this stage
+
+| File | Contents |
+|---|---|
+| `orientation.md` | Item 0 map: ingestion, signal, execution boundaries |
+| `fix_ledger.md` | Before/after metrics per item, with toggle names |
+| `trial_ledger.md` | Item 4.1 — running trial count and out-of-sample inspection log |
+| `found_not_fixed.md` | Defects observed, out of scope, unrepaired |
+| `deferred_register.md` | 1.6 futures, 3.1 intraday exit resolution, anything else parked |
+
+Report at each gate. Wait for approval before implementing. Do not repair a fix.
