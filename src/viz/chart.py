@@ -2154,19 +2154,105 @@ def _fmt_ratio(v: float) -> str:
     return "n/a" if pd.isna(v) else f"{v:.2f}"
 
 
+def _fmt_pct2(v: float, signed: bool = False) -> str:
+    if pd.isna(v):
+        return "n/a"
+    return f"{v:+.2%}" if signed else f"{v:.2%}"
+
+
+def _fmt_split(total: int, first: int, second: int, third: int | None = None) -> str:
+    """
+    `140 (57.1% / 42.9%)` - the raw total is kept, its split shown as
+    percentages. A third part is optional (up/down/flat days).
+    """
+    if total <= 0:
+        return str(total)
+    parts = [first, second] + ([third] if third is not None else [])
+    return f"{total} ({' / '.join(f'{p / total:.1%}' for p in parts)})"
+
+
+def _stats_page(
+    root: Chart, headings: tuple, widths: tuple,
+    portfolio_row: tuple, ticker_rows: list[tuple],
+    body_top: float, left: float, width: float,
+    portfolio_h: float, tickers_h: float, visible: bool,
+) -> list[str]:
+    """
+    One stats page: a bold, non-scrolling Portfolio row pinned directly under
+    the headings, with the per-ticker rows scrolling beneath it.
+
+    The library's Table has no sticky-first-row option, so the frozen row is a
+    second Table stacked above the scrolling one - which would render the
+    heading line twice, so the lower table's own `<thead>` is hidden and the
+    page shows exactly one heading line. Each script body is wrapped in a block
+    so its `const` doesn't collide with the other pages' (all run_script calls
+    share one global scope).
+    """
+    pinned = root.create_table(
+        width=width, height=portfolio_h, headings=headings, widths=widths,
+        position="right", func=lambda _row: None,
+    )
+    pinned.new_row(*portfolio_row)
+    hide = "" if visible else "style.display = 'none'"
+    pinned.run_script(f"""
+    {{
+        const d = {pinned.id}._div
+        d.style.fontSize = '14px'
+        d.style.fontWeight = 'bold'
+        d.style.float = 'none'
+        d.style.position = 'absolute'
+        d.style.top = '{body_top * 100}%'
+        d.style.left = '{left * 100}%'
+        {f"d.{hide}" if hide else ""}
+    }}
+    """)
+
+    scrolling = root.create_table(
+        width=width, height=tickers_h, headings=headings, widths=widths,
+        position="right", func=lambda _row: None,
+    )
+    for row in ticker_rows:
+        scrolling.new_row(*row)
+    scrolling.run_script(f"""
+    {{
+        const d = {scrolling.id}._div
+        d.style.fontSize = '13px'
+        const scrollArea = d.querySelector('div')
+        scrollArea.style.flex = '1 1 auto'
+        scrollArea.style.minHeight = '0'
+        // Hide the heading ROW only, never the whole <thead>. The library's
+        // newRow() uses table.insertRow(), which per spec appends to the parent
+        // of the last <tr> - and the only row at that point is the heading one
+        // inside <thead>, so every data row lands in <thead> as well. Hiding
+        // the section would hide all the ticker rows with it.
+        const headRow = d.querySelector('table').tHead?.rows[0]
+        if (headRow) headRow.style.display = 'none'
+        d.style.float = 'none'
+        d.style.position = 'absolute'
+        d.style.top = '{(body_top + portfolio_h) * 100}%'
+        d.style.left = '{left * 100}%'
+        {f"d.{hide}" if hide else ""}
+    }}
+    """)
+    return [f"{pinned.id}._div", f"{scrolling.id}._div"]
+
+
 def _build_portfolio_stats_tables(
     root: Chart, result: "PortfolioBacktestResult",
     top: float, left: float, width: float, height: float,
 ) -> None:
     """
-    Three "pages" toggled by a row of buttons above the table (not a native
-    tab widget - a plain dropdown/tab metaphor was judged less obvious for
-    the end user than explicit labeled buttons). Page 1 and 3 each reuse the
-    same pinned-Portfolio-row-plus-scrollable-tickers layout (the library's
-    Table widget has no sticky-first-row option, so a frozen top row is a
-    second, separate, non-scrolling Table stacked above the scrolling one) -
-    page 2 has no meaningful "Portfolio" aggregate row (long/short is a
-    per-ticker breakdown), so it's just one scrollable table.
+    Three "pages" toggled by a row of buttons above the table (not a native tab
+    widget - a plain dropdown/tab metaphor was judged less obvious for the end
+    user than explicit labeled buttons). All three share the same shape via
+    `_stats_page`: one heading line, a bold pinned Portfolio row, then the
+    tickers alphabetically.
+
+    Every Portfolio figure is a genuine portfolio-level measurement, never an
+    aggregate of the per-ticker column above it - max drawdown comes from the
+    combined equity curve (tickers don't bottom on the same day, so max() of
+    their drawdowns would be plain wrong), and the benchmark columns come from
+    the weighted buy&hold curve.
     """
     button_h = height * 0.07
     body_top = top + button_h
@@ -2174,117 +2260,91 @@ def _build_portfolio_stats_tables(
     portfolio_h = body_height * 0.16
     tickers_h = body_height - portfolio_h
 
-    # ---- page 1: Return & Sharpe ----
-    headings1 = ("Ticker", "Return", "Sharpe", "Win rate", "Batches")
-    widths1 = (0.28, 0.22, 0.18, 0.18, 0.14)
+    symbols = sorted(result.per_ticker)
 
-    p1_portfolio = root.create_table(
-        width=width, height=portfolio_h, headings=headings1, widths=widths1,
-        position="right", func=lambda _row: None,
-    )
-    p1_portfolio.new_row(
-        "Portfolio", f"{result.portfolio_return:.2%}",
-        "n/a" if pd.isna(result.portfolio_sharpe) else f"{result.portfolio_sharpe:.2f}", "-", "-",
-    )
-    p1_portfolio.run_script(
-        f"""
-        {p1_portfolio.id}._div.style.fontSize = '14px'
-        {p1_portfolio.id}._div.style.fontWeight = 'bold'
-        {p1_portfolio.id}._div.style.float = 'none'
-        {p1_portfolio.id}._div.style.position = 'absolute'
-        {p1_portfolio.id}._div.style.top = '{body_top * 100}%'
-        {p1_portfolio.id}._div.style.left = '{left * 100}%'
-        """
-    )
-
-    p1_tickers = root.create_table(
-        width=width, height=tickers_h, headings=headings1, widths=widths1,
-        position="right", func=lambda _row: None,
-    )
-    for symbol in sorted(result.per_ticker):
-        r = result.per_ticker[symbol]
-        p1_tickers.new_row(
-            symbol, f"{r.total_return:.2%}",
-            "n/a" if pd.isna(r.sharpe) else f"{r.sharpe:.2f}",
-            _fmt_pct(r.win_rate), str(r.n_batches),
-        )
-    p1_tickers.run_script(
-        f"""
-        {p1_tickers.id}._div.style.fontSize = '13px'
-        const scrollArea1 = {p1_tickers.id}._div.querySelector('div')
-        scrollArea1.style.flex = '1 1 auto'
-        scrollArea1.style.minHeight = '0'
-        {p1_tickers.id}._div.style.float = 'none'
-        {p1_tickers.id}._div.style.position = 'absolute'
-        {p1_tickers.id}._div.style.top = '{(body_top + portfolio_h) * 100}%'
-        {p1_tickers.id}._div.style.left = '{left * 100}%'
-        """
+    # ---- page 1: Performance ----
+    # Contribution L + S == Return by construction (see
+    # `_direction_contributions`), so those two columns cross-check each other.
+    pb = result.portfolio_benchmark
+    page1 = _stats_page(
+        root,
+        ("Ticker", "Return", "Sharpe", "B&H Return", "B&H Sharpe", "Contribution % (L/S)"),
+        (0.14, 0.15, 0.13, 0.16, 0.15, 0.27),
+        (
+            "Portfolio", _fmt_pct2(result.portfolio_return), _fmt_ratio(result.portfolio_sharpe),
+            _fmt_pct2(pb.buy_hold_return), _fmt_ratio(pb.buy_hold_sharpe),
+            "-",  # contribution is a per-ticker split; no portfolio aggregate
+        ),
+        [
+            (
+                s, _fmt_pct2(r.total_return), _fmt_ratio(r.sharpe),
+                _fmt_pct2(r.benchmark.buy_hold_return), _fmt_ratio(r.benchmark.buy_hold_sharpe),
+                f"{_fmt_pct2(r.long.contribution_pct, signed=True)} / "
+                f"{_fmt_pct2(r.short.contribution_pct, signed=True)}",
+            )
+            for s, r in ((s, result.per_ticker[s]) for s in symbols)
+        ],
+        body_top, left, width, portfolio_h, tickers_h, visible=True,
     )
 
-    # ---- page 2: Long/Short breakdown ----
-    headings2 = ("Ticker", "Win rate (L/S)", "Payoff (L/S)", "Batches (Long/Short)", "Contribution % (L/S)")
-    widths2 = (0.16, 0.22, 0.20, 0.22, 0.20)
-
-    p2_tickers = root.create_table(
-        width=width, height=body_height, headings=headings2, widths=widths2,
-        position="right", func=lambda _row: None,
-    )
-    for symbol in sorted(result.per_ticker):
-        r = result.per_ticker[symbol]
-        long_, short_ = r.long, r.short
-        p2_tickers.new_row(
-            symbol,
-            f"{_fmt_pct(long_.win_rate)} / {_fmt_pct(short_.win_rate)}",
-            f"{_fmt_ratio(long_.payoff_ratio)} / {_fmt_ratio(short_.payoff_ratio)}",
-            f"{r.n_batches}({long_.n_batches}/{short_.n_batches})",
-            f"{_fmt_pct(long_.contribution_pct, signed=True)} / {_fmt_pct(short_.contribution_pct, signed=True)}",
-        )
-    p2_tickers.run_script(
-        f"""
-        {p2_tickers.id}._div.style.fontSize = '13px'
-        const scrollArea2 = {p2_tickers.id}._div.querySelector('div')
-        scrollArea2.style.flex = '1 1 auto'
-        scrollArea2.style.minHeight = '0'
-        {p2_tickers.id}._div.style.float = 'none'
-        {p2_tickers.id}._div.style.position = 'absolute'
-        {p2_tickers.id}._div.style.top = '{body_top * 100}%'
-        {p2_tickers.id}._div.style.left = '{left * 100}%'
-        {p2_tickers.id}._div.style.display = 'none'
-        """
+    # ---- page 2: Quality & Risk ----
+    # Portfolio win rate / payoff pool every ticker's batches (unweighted - a
+    # statement about the rule set, not the P&L); MaxDD is the combined curve's.
+    page2 = _stats_page(
+        root,
+        ("Ticker", "Win rate", "Win rate (L/S)", "Payoff", "MaxDD"),
+        (0.20, 0.18, 0.26, 0.16, 0.20),
+        (
+            "Portfolio", _fmt_pct(result.portfolio_win_rate),
+            f"{_fmt_pct(result.portfolio_long.win_rate)} / {_fmt_pct(result.portfolio_short.win_rate)}",
+            _fmt_ratio(result.portfolio_payoff), _fmt_pct2(result.portfolio_max_drawdown),
+        ),
+        [
+            (
+                s, _fmt_pct(r.win_rate),
+                f"{_fmt_pct(r.long.win_rate)} / {_fmt_pct(r.short.win_rate)}",
+                _fmt_ratio(r.payoff_ratio), _fmt_pct2(r.max_drawdown),
+            )
+            for s, r in ((s, result.per_ticker[s]) for s in symbols)
+        ],
+        body_top, left, width, portfolio_h, tickers_h, visible=False,
     )
 
-    # ---- page 3: Benchmark (plain buy&hold, per ticker) ----
-    headings3 = ("Ticker", "Buy&Hold", "B&H Sharpe", "Up/Down Days", "Avg Move (Up/Down/Total)")
-    widths3 = (0.16, 0.16, 0.16, 0.22, 0.30)
-
-    p3_tickers = root.create_table(
-        width=width, height=body_height, headings=headings3, widths=widths3,
-        position="right", func=lambda _row: None,
+    # ---- page 3: Activity & Market ----
+    # Portfolio batches are a true total (every batch, once); the day counts and
+    # average move come from the weighted buy&hold curve, i.e. how the portfolio
+    # as a whole moved - not an average of the per-ticker rows.
+    page3 = _stats_page(
+        root,
+        ("Ticker", "Batches (L/S)", "Up/Down/Flat Days", "Mkt Avg Move (Up/Down)"),
+        (0.18, 0.28, 0.28, 0.26),
+        (
+            "Portfolio",
+            _fmt_split(
+                result.portfolio_n_batches,
+                result.portfolio_long.n_batches, result.portfolio_short.n_batches,
+            ),
+            _fmt_split(
+                pb.up_days + pb.down_days + pb.flat_days,
+                pb.up_days, pb.down_days, pb.flat_days,
+            ),
+            f"{_fmt_pct2(pb.avg_up, signed=True)} / {_fmt_pct2(pb.avg_down, signed=True)}",
+        ),
+        [
+            (
+                s,
+                _fmt_split(r.n_batches, r.long.n_batches, r.short.n_batches),
+                _fmt_split(
+                    r.benchmark.up_days + r.benchmark.down_days + r.benchmark.flat_days,
+                    r.benchmark.up_days, r.benchmark.down_days, r.benchmark.flat_days,
+                ),
+                f"{_fmt_pct2(r.benchmark.avg_up, signed=True)} / "
+                f"{_fmt_pct2(r.benchmark.avg_down, signed=True)}",
+            )
+            for s, r in ((s, result.per_ticker[s]) for s in symbols)
+        ],
+        body_top, left, width, portfolio_h, tickers_h, visible=False,
     )
-    for symbol in sorted(result.per_ticker):
-        b = result.per_ticker[symbol].benchmark
-        total_days = b.up_days + b.down_days
-        p3_tickers.new_row(
-            symbol,
-            _fmt_pct(b.buy_hold_return),
-            _fmt_ratio(b.buy_hold_sharpe),
-            f"{total_days}({b.up_days}/{b.down_days})",
-            f"{_fmt_pct(b.avg_up, signed=True)} / {_fmt_pct(b.avg_down, signed=True)} / {_fmt_pct(b.avg_total, signed=True)}",
-        )
-    p3_tickers.run_script(
-        f"""
-        {p3_tickers.id}._div.style.fontSize = '13px'
-        const scrollArea3 = {p3_tickers.id}._div.querySelector('div')
-        scrollArea3.style.flex = '1 1 auto'
-        scrollArea3.style.minHeight = '0'
-        {p3_tickers.id}._div.style.float = 'none'
-        {p3_tickers.id}._div.style.position = 'absolute'
-        {p3_tickers.id}._div.style.top = '{body_top * 100}%'
-        {p3_tickers.id}._div.style.left = '{left * 100}%'
-        {p3_tickers.id}._div.style.display = 'none'
-        """
-    )
-
     # ---- page-toggle buttons ----
     root.run_script(f"""
         const statsBtnBar = document.createElement('div')
@@ -2312,18 +2372,19 @@ def _build_portfolio_stats_tables(
             b.style.color = '#d1d4dc'
             return b
         }}
-        const statsBtn1 = mkStatsBtn('收益与Sharpe')
-        const statsBtn2 = mkStatsBtn('多空对比')
-        const statsBtn3 = mkStatsBtn('Benchmark')
+        const statsBtn1 = mkStatsBtn('Performance')
+        const statsBtn2 = mkStatsBtn('Quality & Risk')
+        const statsBtn3 = mkStatsBtn('Activity & Market')
         statsBtnBar.appendChild(statsBtn1)
         statsBtnBar.appendChild(statsBtn2)
         statsBtnBar.appendChild(statsBtn3)
         window.containerDiv.appendChild(statsBtnBar)
 
-        const statsPage1 = [{p1_portfolio.id}._div, {p1_tickers.id}._div]
-        const statsPage2 = [{p2_tickers.id}._div]
-        const statsPage3 = [{p3_tickers.id}._div]
-        const allStatsPages = [statsPage1, statsPage2, statsPage3]
+        const allStatsPages = [
+            [{", ".join(page1)}],
+            [{", ".join(page2)}],
+            [{", ".join(page3)}],
+        ]
         const allStatsBtns = [statsBtn1, statsBtn2, statsBtn3]
         const showStatsPage = (n) => {{
             allStatsPages.forEach((pageDivs, i) => {{

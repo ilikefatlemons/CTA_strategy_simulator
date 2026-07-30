@@ -34,9 +34,15 @@ class DirectionStats:
     n_batches: int = 0
     win_rate: float = float("nan")
     payoff_ratio: float = float("nan")  # avg winning batch pnl_pct / abs(avg losing batch pnl_pct)
-    # This direction's share of the PORTFOLIO's total profit, as a fraction
-    # (e.g. 0.0654 = "6.54% of total profit") - matches win_rate's
-    # fraction convention, not a pre-multiplied percentage.
+    # This direction's share of THIS TICKER's own gain/loss, as a fraction of
+    # the ticker's starting capital - so long.contribution_pct +
+    # short.contribution_pct == the ticker's total_return.
+    #
+    # It used to be a share of the PORTFOLIO's net profit, which inverts every
+    # sign whenever the portfolio is down (a losing side divided by a negative
+    # total reads as a positive contributor) and explodes as that total nears
+    # zero. Dividing by starting capital keeps the denominator fixed and
+    # positive, so a losing side always shows negative.
     contribution_pct: float = float("nan")
 
 
@@ -48,6 +54,10 @@ class BenchmarkStats:
     buy_hold_sharpe: float = float("nan")
     up_days: int = 0
     down_days: int = 0
+    # Days whose close was EXACTLY unchanged. Counted separately so
+    # up + down + flat reconciles to the day count - strict >0 / <0 tests
+    # otherwise silently drop them (0-3 days per symbol here).
+    flat_days: int = 0
     avg_up: float = float("nan")  # mean daily % move on up days
     avg_down: float = float("nan")  # mean daily % move on down days (negative)
     avg_total: float = float("nan")  # mean daily % move across every day (signed)
@@ -61,6 +71,10 @@ class TickerResult:
     total_return: float
     win_rate: float
     n_batches: int
+    payoff_ratio: float = float("nan")  # across ALL batches, both directions
+    avg_win: float = float("nan")  # mean winning batch, as a fraction of capital
+    avg_loss: float = float("nan")  # mean losing batch (negative)
+    max_drawdown: float = float("nan")  # worst peak-to-trough on this ticker's own curve
     benchmark: BenchmarkStats = field(default_factory=BenchmarkStats)
     long: DirectionStats = field(default_factory=DirectionStats)
     short: DirectionStats = field(default_factory=DirectionStats)
@@ -76,6 +90,21 @@ class PortfolioBacktestResult:
     portfolio_equity_curve: pd.Series = field(default_factory=pd.Series)
     portfolio_sharpe: float = float("nan")
     portfolio_return: float = float("nan")
+    # Portfolio-level aggregates. These are deliberately NOT per-ticker values
+    # combined: max drawdown is measured on the portfolio equity curve itself
+    # (the worst the COMBINED book ever was - never max() of the per-ticker
+    # drawdowns, which would be both wrong and pessimistic since tickers do not
+    # bottom on the same day), and the benchmark stats come from the weighted
+    # buy&hold curve rather than an average of the per-ticker benchmarks.
+    portfolio_max_drawdown: float = float("nan")
+    portfolio_win_rate: float = float("nan")
+    portfolio_payoff: float = float("nan")
+    portfolio_avg_win: float = float("nan")
+    portfolio_avg_loss: float = float("nan")
+    portfolio_n_batches: int = 0
+    portfolio_long: DirectionStats = field(default_factory=DirectionStats)
+    portfolio_short: DirectionStats = field(default_factory=DirectionStats)
+    portfolio_benchmark: BenchmarkStats = field(default_factory=BenchmarkStats)
     # Same daily inverse-ATR weights as portfolio_equity_curve, but applied to
     # each ticker's plain buy-and-hold daily return instead of the strategy's
     # trade-driven return - isolates how much of the portfolio's return comes
@@ -115,20 +144,92 @@ def _direction_by_day(df_5m: pd.DataFrame, trades: list[Trade], days: "pd.Index"
     return direction_by_day
 
 
+def _win_loss_avgs(pnls: list[float]) -> tuple[float, float]:
+    """
+    (avg winning batch, avg losing batch), each as a fraction of capital.
+
+    These are what turn a payoff ratio into money: an expectancy of -0.31R says
+    "loses 0.31 average-losses per batch", which is only -0.16% of capital if
+    the average loss is 0.52%. The ratio alone doesn't tell you the size.
+    """
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    return (
+        sum(wins) / len(wins) if wins else float("nan"),
+        sum(losses) / len(losses) if losses else float("nan"),
+    )
+
+
+def _payoff(pnls: list[float]) -> float:
+    """avg winning batch / abs(avg losing batch); nan unless both sides exist."""
+    avg_win, avg_loss = _win_loss_avgs(pnls)
+    if pd.isna(avg_win) or pd.isna(avg_loss) or avg_loss == 0:
+        return float("nan")
+    return avg_win / abs(avg_loss)
+
+
+def _benchmark_stats(daily: pd.Series, base: float | None = None) -> BenchmarkStats:
+    """
+    Buy&hold stats from a daily series. `base` is what the first day is measured
+    against: the portfolio benchmark curve already has one day's return baked
+    into its first point, so it needs its starting capital passed explicitly,
+    whereas a plain price series measures from its own first close.
+
+    sharpe_ratio only needs pct-change behaviour plus a date-like index, which a
+    daily series already has - no synthetic equity curve required.
+    """
+    if not len(daily):
+        return BenchmarkStats()
+    prev = daily.shift(1)
+    if base is not None:
+        prev = prev.fillna(base)
+    pct = (daily / prev - 1).dropna()
+    start = float(base) if base is not None else float(daily.iloc[0])
+    up, down, flat = pct[pct > 0], pct[pct < 0], pct[pct == 0]
+    return BenchmarkStats(
+        buy_hold_return=(float(daily.iloc[-1]) / start - 1) if start else float("nan"),
+        buy_hold_sharpe=sharpe_ratio(daily),
+        up_days=len(up), down_days=len(down), flat_days=len(flat),
+        avg_up=up.mean() if len(up) else float("nan"),
+        avg_down=down.mean() if len(down) else float("nan"),
+        avg_total=pct.mean() if len(pct) else float("nan"),
+    )
+
+
+def _direction_contributions(
+    df_5m: pd.DataFrame, trades: list[Trade], equity_curve: pd.Series, initial_capital: float,
+) -> dict[str, float]:
+    """
+    Split this ticker's own gain/loss into long vs short, as a fraction of its
+    STARTING CAPITAL - so the two returned values sum to the ticker's
+    total_return (see DirectionStats.contribution_pct for why the denominator
+    is not the portfolio's net profit).
+
+    Exact by telescoping: each day's dollar change is equity(d) - equity(d-1),
+    attributed to whichever direction held a position that day, and the daily
+    changes sum to final - initial. Only days inside no batch's span are
+    unattributed, and those are days with no position, i.e. zero change.
+    """
+    if equity_curve.empty:
+        return {"long": float("nan"), "short": float("nan")}
+    daily_eq = equity_curve.groupby(pd.DatetimeIndex(equity_curve.index).date).last()
+    delta = daily_eq - daily_eq.shift(1).fillna(initial_capital)
+    by_day = _direction_by_day(df_5m, trades, list(daily_eq.index))
+    contrib = {"long": 0.0, "short": 0.0}
+    for day, change in delta.items():
+        direction = by_day.get(day)
+        if change and direction is not None:
+            contrib[direction] += float(change)
+    return {k: v / initial_capital for k, v in contrib.items()}
+
+
 def _direction_stats(batch_pnls: dict[int, tuple[str, float]], direction: str) -> DirectionStats:
     pnls = [pnl for d, pnl in batch_pnls.values() if d == direction]
     n = len(pnls)
     if n == 0:
         return DirectionStats(n_batches=0)
-    wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p <= 0]
-    win_rate = len(wins) / n
-    avg_win = sum(wins) / len(wins) if wins else float("nan")
-    avg_loss = sum(losses) / len(losses) if losses else float("nan")
-    payoff_ratio = (
-        avg_win / abs(avg_loss) if wins and losses and avg_loss != 0 else float("nan")
-    )
-    return DirectionStats(n_batches=n, win_rate=win_rate, payoff_ratio=payoff_ratio)
+    win_rate = len([p for p in pnls if p > 0]) / n
+    return DirectionStats(n_batches=n, win_rate=win_rate, payoff_ratio=_payoff(pnls))
 
 
 def _ticker_result(df_5m: pd.DataFrame, initial_capital: float, config: BacktestConfig) -> TickerResult:
@@ -139,27 +240,23 @@ def _ticker_result(df_5m: pd.DataFrame, initial_capital: float, config: Backtest
     n_batches = len(batch_pnls)
     wins = sum(1 for _d, pnl in batch_pnls.values() if pnl > 0)
     win_rate = wins / n_batches if n_batches else float("nan")
-    closes = daily_closes(df_5m)
-    buy_hold_return = closes.iloc[-1] / closes.iloc[0] - 1 if len(closes) else float("nan")
-    # sharpe_ratio only needs pct-change behavior + a date-like index, which
-    # a plain daily close series already has - no need for a synthetic
-    # buy&hold equity curve.
-    buy_hold_sharpe = sharpe_ratio(closes)
-    daily_pct = closes.pct_change().dropna()
-    up = daily_pct[daily_pct > 0]
-    down = daily_pct[daily_pct < 0]
-    benchmark = BenchmarkStats(
-        buy_hold_return=buy_hold_return, buy_hold_sharpe=buy_hold_sharpe,
-        up_days=len(up), down_days=len(down),
-        avg_up=up.mean() if len(up) else float("nan"),
-        avg_down=down.mean() if len(down) else float("nan"),
-        avg_total=daily_pct.mean() if len(daily_pct) else float("nan"),
-    )
+    benchmark = _benchmark_stats(daily_closes(df_5m))
+    eq = result.equity_curve
+    max_drawdown = float((eq / eq.cummax() - 1.0).min()) if len(eq) else float("nan")
+    pnl_list = [pnl for _direction, pnl in batch_pnls.values()]
+    avg_win, avg_loss = _win_loss_avgs(pnl_list)
+    contrib = _direction_contributions(df_5m, result.trades, eq, initial_capital)
+    long_stats = _direction_stats(batch_pnls, "long")
+    short_stats = _direction_stats(batch_pnls, "short")
+    long_stats.contribution_pct = contrib["long"]
+    short_stats.contribution_pct = contrib["short"]
     return TickerResult(
         trades=result.trades, equity_curve=result.equity_curve, sharpe=sharpe,
         total_return=total_return, win_rate=win_rate, n_batches=n_batches,
+        payoff_ratio=_payoff(pnl_list), avg_win=avg_win, avg_loss=avg_loss,
+        max_drawdown=max_drawdown,
         benchmark=benchmark,
-        long=_direction_stats(batch_pnls, "long"), short=_direction_stats(batch_pnls, "short"),
+        long=long_stats, short=short_stats,
         pullback_points=result.pullback_points, cooldown_spans=result.cooldown_spans,
     )
 
@@ -257,18 +354,37 @@ def run_portfolio_pullback_backtest(
     benchmark_ret_series = pd.Series(benchmark_returns, index=dates_idx).fillna(0.0)
     benchmark_equity_curve = initial_capital * (1.0 + benchmark_ret_series).cumprod()
 
-    total_profit_dollar = portfolio_equity_curve.iloc[-1] - initial_capital if len(portfolio_equity_curve) else 0.0
-    if total_profit_dollar:
-        for s in symbols:
-            # Fraction (not already *100), matching win_rate/buy_hold_return's
-            # convention - chart.py's `_fmt_pct` applies the `:.1%` format
-            # spec, which multiplies by 100 itself.
-            per_ticker[s].long.contribution_pct = contrib_dollar[s]["long"] / total_profit_dollar
-            per_ticker[s].short.contribution_pct = contrib_dollar[s]["short"] / total_profit_dollar
+    # NOTE: contribution_pct is set per ticker in `_ticker_result`, against that
+    # ticker's own starting capital. It is deliberately NOT a share of the
+    # portfolio's net profit - that denominator flips every sign whenever the
+    # portfolio is down and blows up as it approaches zero.
+    def _max_dd(curve: pd.Series) -> float:
+        return float((curve / curve.cummax() - 1.0).min()) if len(curve) else float("nan")
+
+    # Pooled trade stats across every ticker: "of all the trades the strategy
+    # took, how many won". Honest as stated, but note it is UNWEIGHTED - a trade
+    # on a small-weight ticker counts the same as one on a large-weight ticker,
+    # so this is a statement about the rule set, not about the P&L.
+    pooled = dict(enumerate(
+        pnl for s in symbols for pnl in _batch_pnls(per_ticker[s].trades).values()
+    ))
+    pooled_pnls = [pnl for _direction, pnl in pooled.values()]
 
     return PortfolioBacktestResult(
         per_ticker=per_ticker, weights_history=weights_history,
         portfolio_equity_curve=portfolio_equity_curve,
         portfolio_sharpe=portfolio_sharpe, portfolio_return=portfolio_return,
+        portfolio_max_drawdown=_max_dd(portfolio_equity_curve),
+        portfolio_win_rate=(
+            len([p for p in pooled_pnls if p > 0]) / len(pooled_pnls)
+            if pooled_pnls else float("nan")
+        ),
+        portfolio_payoff=_payoff(pooled_pnls),
+        portfolio_avg_win=_win_loss_avgs(pooled_pnls)[0],
+        portfolio_avg_loss=_win_loss_avgs(pooled_pnls)[1],
+        portfolio_n_batches=len(pooled_pnls),
+        portfolio_long=_direction_stats(pooled, "long"),
+        portfolio_short=_direction_stats(pooled, "short"),
+        portfolio_benchmark=_benchmark_stats(benchmark_equity_curve, base=initial_capital),
         benchmark_equity_curve=benchmark_equity_curve,
     )
