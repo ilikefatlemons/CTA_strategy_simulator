@@ -64,6 +64,9 @@ class TickerResult:
     benchmark: BenchmarkStats = field(default_factory=BenchmarkStats)
     long: DirectionStats = field(default_factory=DirectionStats)
     short: DirectionStats = field(default_factory=DirectionStats)
+    # Observability only, for the chart's admin overlay (see PullbackBacktestResult).
+    pullback_points: list = field(default_factory=list)
+    cooldown_spans: list = field(default_factory=list)
 
 
 @dataclass
@@ -157,6 +160,7 @@ def _ticker_result(df_5m: pd.DataFrame, initial_capital: float, config: Backtest
         total_return=total_return, win_rate=win_rate, n_batches=n_batches,
         benchmark=benchmark,
         long=_direction_stats(batch_pnls, "long"), short=_direction_stats(batch_pnls, "short"),
+        pullback_points=result.pullback_points, cooldown_spans=result.cooldown_spans,
     )
 
 

@@ -36,6 +36,9 @@ class Trade:
     reason: str  # "SL" | "TP"(部分止盈) | "PROTECTIVE_SL"(护盈止损)
     size_fraction: float  # 这条腿占整批仓位的比例
     signal_type: str  # "open" | "reentry"
+    # True when the bar gapped through the stop and the fill was taken at the
+    # bar's open instead of the stop line (Item 3.5). Display only.
+    gapped: bool = False
 
     @property
     def pnl_pct(self) -> float:
@@ -50,6 +53,11 @@ class Trade:
 class PullbackBacktestResult:
     trades: list[Trade] = field(default_factory=list)
     equity_curve: pd.Series = field(default_factory=pd.Series)
+    # Observability only, for the chart's admin overlay - no decision reads these.
+    # pullback_points: {"bar_idx", "direction", "price"} per 回调 confirmation.
+    # cooldown_spans: (start_bar_idx, end_bar_idx) inclusive, cooldown active.
+    pullback_points: list = field(default_factory=list)
+    cooldown_spans: list = field(default_factory=list)
 
 
 @dataclass
@@ -122,6 +130,10 @@ def run_pullback_backtest(
     capital = initial_capital
     batch: _OpenBatch | None = None
     had_prior_batch = False
+    # Observability only - see PullbackBacktestResult.
+    pullback_points: list = []
+    cooldown_spans: list = []
+    cd_start: int | None = None
 
     def attempt_entry(
         i: int, row: pd.Series,
@@ -155,6 +167,11 @@ def run_pullback_backtest(
             close=row["close"], atr=atr_dec,
         )
         signal = entry_engine.on_bar(snapshot)
+        if entry_engine.pullback_confirmed_this_bar:
+            pullback_points.append({
+                "bar_idx": i, "direction": entry_engine.last_pullback_bias,
+                "price": float(row["close"]),
+            })
         if signal is not None and pd.notna(atr_dec):
             entry_price = df_5m["open"].iloc[fill_idx]
             stop = stop_calc.calc(entry_price, signal.direction, atr_dec, klines_30m)
@@ -225,10 +242,12 @@ def run_pullback_backtest(
                 # range-based) -> pessimistic takes the stop first.
                 take_sl = hit_sl and (cfg.pessimistic_both_hit or not hit_tp)
                 if take_sl:
+                    sl_fill = gap_filled(batch.stop_loss, is_long, bar_open)
                     trades.append(Trade(
                         direction=batch.direction, entry_bar_idx=batch.entry_bar_idx, entry_price=batch.entry_price,
-                        exit_bar_idx=i, exit_price=gap_filled(batch.stop_loss, is_long, bar_open),
+                        exit_bar_idx=i, exit_price=sl_fill,
                         reason="SL", size_fraction=1.0, signal_type=batch.signal_type,
+                        gapped=sl_fill != batch.stop_loss,
                     ))
                     capital *= 1 + trades[-1].pnl_pct
                     cooldown.on_trade_closed(batch.direction, "SL")
@@ -244,11 +263,10 @@ def run_pullback_backtest(
                     batch.partial_taken = True
                     batch.trailing_stop = batch.stop_loss
             else:
-                # use i-1's ATR, not i's - i's ATR needs bar i's own close,
-                # so it isn't known until bar i has already happened, and
-                # can't be used to decide whether bar i's own price (checked
-                # right below) breaches a stop line that depends on it. Under
-                # A6 this reads the last CLOSED 30m bar; otherwise 5m bar i-1.
+                # Never bar i's own ATR - it needs bar i's own close, so it
+                # isn't known when bar i's price (checked right below) is tested
+                # against a stop line that depends on it. Under A6 this reads
+                # the last CLOSED 30m bar; otherwise 5m bar i-1.
                 atr_prev = risk_atr(i, prev_bar=True)
                 if pd.notna(atr_prev):
                     batch.trailing_stop = tp_manager.chandelier_stop(
@@ -260,10 +278,12 @@ def run_pullback_backtest(
                     hit_trail = bar_close <= batch.trailing_stop if is_long else bar_close >= batch.trailing_stop
                 if hit_trail:
                     remaining = 1.0 - tp_manager.partial_ratio
+                    trail_fill = gap_filled(batch.trailing_stop, is_long, bar_open)
                     trades.append(Trade(
                         direction=batch.direction, entry_bar_idx=batch.entry_bar_idx, entry_price=batch.entry_price,
-                        exit_bar_idx=i, exit_price=gap_filled(batch.trailing_stop, is_long, bar_open),
+                        exit_bar_idx=i, exit_price=trail_fill,
                         reason="PROTECTIVE_SL", size_fraction=remaining, signal_type=batch.signal_type,
+                        gapped=trail_fill != batch.trailing_stop,
                     ))
                     capital *= 1 + remaining * trades[-1].pnl_pct
                     cooldown.on_trade_closed(batch.direction, "PROTECTIVE_SL")
@@ -298,5 +318,21 @@ def run_pullback_backtest(
             unrealized = frac * move / batch.entry_price
         equity[i] = capital * (1 + unrealized)
 
+        # Observability only: record contiguous stretches where the cooldown
+        # blocked new entries. Checked at the END of the bar so a cooldown
+        # armed by this bar's own exit is attributed to this bar.
+        if cooldown.is_active():
+            if cd_start is None:
+                cd_start = i
+        elif cd_start is not None:
+            cooldown_spans.append((cd_start, i - 1))
+            cd_start = None
+
+    if cd_start is not None:
+        cooldown_spans.append((cd_start, n - 1))
+
     equity_curve = pd.Series(equity, index=df_5m["timestamp"])
-    return PullbackBacktestResult(trades=trades, equity_curve=equity_curve)
+    return PullbackBacktestResult(
+        trades=trades, equity_curve=equity_curve,
+        pullback_points=pullback_points, cooldown_spans=cooldown_spans,
+    )

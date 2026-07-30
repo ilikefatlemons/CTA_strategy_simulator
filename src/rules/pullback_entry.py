@@ -38,8 +38,13 @@ class PullbackEntryEngine:
         self.cooldown = cooldown
         self._bias: Bias = "neutral"
         self._pullback_seen = False
+        # Observability only (admin overlay on the chart) - never read by any
+        # decision. True on the bar where 回调 confirmation fires.
+        self.pullback_confirmed_this_bar = False
+        self.last_pullback_bias: Bias = "neutral"
 
     def on_bar(self, snapshot: MarketSnapshot) -> Signal | None:
+        self.pullback_confirmed_this_bar = False
         if self.cooldown.is_active():
             return None
 
@@ -55,6 +60,8 @@ class PullbackEntryEngine:
         if not self._pullback_seen:
             if self.filter.pullback_occurred(snapshot.small_tf, bias):
                 self._pullback_seen = True
+                self.pullback_confirmed_this_bar = True
+                self.last_pullback_bias = bias
             return None
 
         if self.filter.get_entry_trigger(snapshot.small_tf, bias):

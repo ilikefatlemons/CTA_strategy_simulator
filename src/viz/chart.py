@@ -1536,6 +1536,13 @@ _MA_LINE_COLORS = {5: "#64b5f6", 20: "#ffb74d", 50: "#ba68c8"}
 PROTECTIVE_SL_COLOR = "#7e57c2"
 _PB_REASON_COLOR = {"SL": SL_COLOR, "TP": TP_COLOR, "PROTECTIVE_SL": PROTECTIVE_SL_COLOR}
 _PB_DOT_COLORS = {"open": OPEN_COLOR, **_PB_REASON_COLOR}
+# Marker text labels. PROTECTIVE_SL is abbreviated because every stop marker now
+# carries a fill-quality suffix and "PROTECTIVE_SL(G) 50%" is unreadable sitting
+# on a candle; the color already separates it (purple vs red).
+_PB_REASON_LABEL = {"SL": "SL", "TP": "TP", "PROTECTIVE_SL": "PSL"}
+# Admin-only overlays.
+PULLBACK_COLOR = "#fdd835"  # 回调 confirmation marker
+COOLDOWN_COLOR = "rgba(239, 83, 80, 0.13)"  # cooldown background band
 
 
 def _wire_single_line_legend(chart: AbstractChart, line: "Line", label: str, div_attr: str) -> None:
@@ -1593,8 +1600,16 @@ def _create_pullback_dot_series(main_chart: AbstractChart) -> dict[str, "Line"]:
 
 
 def _set_pullback_markers(
-    chart: Chart, display_df: pd.DataFrame, trades: list, marker_time: Callable[[int], pd.Timestamp] | None
+    chart: Chart, display_df: pd.DataFrame, trades: list,
+    marker_time: Callable[[int], pd.Timestamp] | None,
+    pullback_points: list | None = None,
 ) -> None:
+    """
+    Entry/exit arrows, plus - when `pullback_points` is passed (admin mode) -
+    a circle on every 回调 confirmation bar. Stop exits carry a fill-quality
+    suffix: "(G)" means the bar gapped through the stop and the fill was taken
+    at the bar's open rather than the stop line. No suffix = filled at the line.
+    """
     chart.clear_markers()
     times = display_df["timestamp"]
 
@@ -1623,13 +1638,27 @@ def _set_pullback_markers(
                 "color": OPEN_COLOR,
                 "text": f"Open {'Long' if is_long else 'Short'}",
             })
+        suffix = "(G)" if getattr(t, "gapped", False) else ""
         markers.append({
             "time": exit_time_at(t.exit_bar_idx),
             "position": "above" if is_long else "below",
             "shape": "arrow_down" if is_long else "arrow_up",
             "color": _PB_REASON_COLOR[t.reason],
-            "text": f"{t.reason} {t.size_fraction:.0%}",
+            "text": f"{_PB_REASON_LABEL[t.reason]}{suffix} {t.size_fraction:.0%}",
         })
+
+    for p in pullback_points or []:
+        # Circle, not an arrow, so a 回调 confirmation is never mistaken for an
+        # entry/exit. It marks the bar the pullback was *confirmed* on - the
+        # entry trigger, if it comes at all, is a later bar.
+        markers.append({
+            "time": time_at(p["bar_idx"]),
+            "position": "inside",
+            "shape": "circle",
+            "color": PULLBACK_COLOR,
+            "text": f"Pullback {'L' if p['direction'] == 'long' else 'S'}",
+        })
+
     markers.sort(key=lambda m: m["time"])
     if markers:
         chart.marker_list(markers)
@@ -1658,6 +1687,86 @@ def _set_pullback_dots(
         df["time"] = _to_ns(pd.to_datetime(df["time"]))
         df["color"] = _PB_DOT_COLORS[reason]
         line.set(df)
+
+
+def _cooldown_hist_df(
+    df_5m: pd.DataFrame, spans: list, df_display: pd.DataFrame, rule: str | None,
+) -> pd.DataFrame | None:
+    """
+    Full-height background bars on every display candle overlapping a cooldown
+    stretch (the TradingView session-shading look), as ONE histogram series per
+    tile rather than one `vertical_span` per stretch - a two-year run has
+    hundreds of stretches and a series apiece would mean hundreds of JS series
+    per tile.
+
+    `spans` are inclusive (start, end) 5m bar indices. On a higher timeframe a
+    candle is shaded if ANY 5m bar inside it was cooling, binned by the same
+    `session_window_starts` the markers use. None = nothing to draw.
+    """
+    if not spans:
+        return None
+    cooling = pd.Series(False, index=range(len(df_5m)))
+    for start, end in spans:
+        cooling.iloc[start:end + 1] = True
+    if rule is None:
+        flags = cooling.to_numpy()
+    else:
+        # groupby on the tz-aware Series (not .to_numpy(), which would drop the
+        # tz and then never match df_display's tz-aware timestamps).
+        starts = session_window_starts(df_5m, rule)
+        per_window = cooling.groupby(starts).max()
+        flags = df_display["timestamp"].map(per_window).fillna(False).to_numpy()
+    rows = pd.DataFrame({"time": _to_ns(df_display["timestamp"]), "cooldown": flags.astype(float)})
+    rows = rows[rows["cooldown"] > 0]
+    return rows.reset_index(drop=True) if len(rows) else None
+
+
+def _build_admin_button(
+    root: Chart, top: float, left_px: int, height: float, on_toggle: "Callable[[str], None]",
+) -> None:
+    """
+    Admin toggle for the diagnostic overlays (回调 confirmations + cooldown
+    bands). Built as a custom pinned element rather than `topbar.button`
+    because this layout never creates a library topbar at all - the ticker
+    picker is itself a custom widget (`_build_ticker_search`), so a topbar
+    button would have nowhere visible to render. Anchored in px off that
+    input's fixed 200px width so it sits beside it at any window size.
+    """
+    handler_name = f"admin_toggle_{root.id.rsplit('.', 1)[-1]}"
+    root.win.handlers[handler_name] = on_toggle
+    root.run_script(f"""
+        const adminWrap = document.createElement('div')
+        adminWrap.style.position = 'absolute'
+        adminWrap.style.top = '{top * 100}%'
+        adminWrap.style.left = '{left_px}px'
+        adminWrap.style.height = '{height * 100}%'
+        adminWrap.style.zIndex = '4002'
+        adminWrap.style.display = 'flex'
+        adminWrap.style.alignItems = 'center'
+        adminWrap.style.fontFamily = '{UI_FONT}'
+
+        const adminBtn = document.createElement('div')
+        adminBtn.innerText = 'Admin'
+        adminBtn.style.cursor = 'pointer'
+        adminBtn.style.userSelect = 'none'
+        adminBtn.style.padding = '5px 16px'
+        adminBtn.style.borderRadius = '4px'
+        adminBtn.style.fontSize = '13px'
+        let adminOn = false
+        const paintAdmin = () => {{
+            adminBtn.style.background = adminOn ? '{OPEN_COLOR}' : '#1e222d'
+            adminBtn.style.color = adminOn ? '#ffffff' : '#d1d4dc'
+            adminBtn.style.border = '1px solid ' + (adminOn ? '{OPEN_COLOR}' : '#2a2e39')
+        }}
+        paintAdmin()
+        adminBtn.addEventListener('click', () => {{
+            adminOn = !adminOn
+            paintAdmin()
+            window.callbackFunction(`{handler_name}_~_${{adminOn ? '1' : '0'}}`)
+        }})
+        adminWrap.appendChild(adminBtn)
+        window.containerDiv.appendChild(adminWrap)
+    """)
 
 
 def show_pullback_backtest(
@@ -2298,12 +2407,60 @@ def show_portfolio_pullback_backtest(
         crosshair_entries.append((main_chart, f"{main_chart.id}.series"))
         crosshair_entries.append((atr_chart, f"{atr_line.id}.series"))
 
+        # Cooldown background band (admin overlay). Own price scale with zero
+        # margins so a constant value paints the full tile height behind the
+        # candles; kept out of the legend like the dot series.
+        cooldown_hist = main_chart.create_histogram(
+            "cooldown", color=COOLDOWN_COLOR, price_line=False, price_label=False,
+            scale_margin_top=0.0, scale_margin_bottom=0.0,
+        )
+        cooldown_hist.run_script(f"""
+            try {{
+                const item = {main_chart.id}.legend._lines.find((l) => l.series == {cooldown_hist.id}.series)
+                if (item) {{
+                    {main_chart.id}.legend._lines = {main_chart.id}.legend._lines.filter((l) => l != item)
+                    if (item.row && item.row.parentNode) {{
+                        item.row.parentNode.removeChild(item.row)
+                    }}
+                }}
+            }} catch (e) {{}}
+        """)
+
         tiles[tf] = {
             "main_chart": main_chart, "atr_chart": atr_chart,
             "ma_lines": ma_lines, "dot_series": dot_series, "atr_line": atr_line,
+            "cooldown_hist": cooldown_hist,
         }
 
+    # Which symbol is showing and whether admin overlays are on. `render_ctx`
+    # caches each tile's display frame + bar-index->time mapping so toggling
+    # admin only redraws markers/bands - re-running render_symbol would reset
+    # candles and zoom on every click.
+    view_state = {"symbol": symbols[0], "admin": False}
+    render_ctx: dict[str, tuple] = {}
+
+    def draw_overlays() -> None:
+        symbol = view_state["symbol"]
+        admin = view_state["admin"]
+        ticker = result.per_ticker[symbol]
+        df_5m = dfs[symbol].reset_index(drop=True)
+        for tf in _PB_TIMEFRAME_ORDER:
+            if tf not in render_ctx:
+                continue
+            df_display, marker_time = render_ctx[tf]
+            t = tiles[tf]
+            _set_pullback_markers(
+                t["main_chart"], df_display, ticker.trades, marker_time,
+                pullback_points=ticker.pullback_points if admin else None,
+            )
+            _set_pullback_dots(t["dot_series"], ticker.trades, marker_time, df_display["timestamp"])
+            t["cooldown_hist"].set(
+                _cooldown_hist_df(df_5m, ticker.cooldown_spans, df_display, _PB_RESAMPLE_RULE[tf])
+                if admin else None
+            )
+
     def render_symbol(symbol: str) -> None:
+        view_state["symbol"] = symbol
         df_5m = dfs[symbol].reset_index(drop=True)
         display_candles = {
             tf: (df_5m if rule is None else resample_ohlcv(df_5m, rule))
@@ -2316,8 +2473,6 @@ def show_portfolio_pullback_backtest(
                 continue
             starts = session_window_starts(df_5m, rule)
             floor_maps[tf] = _to_ns(starts).astype("int64") // 10**9
-
-        trades = result.per_ticker[symbol].trades
 
         for tf in _PB_TIMEFRAME_ORDER:
             t = tiles[tf]
@@ -2335,8 +2490,7 @@ def show_portfolio_pullback_backtest(
             else:
                 marker_time = None
 
-            _set_pullback_markers(main_chart, df_display, trades, marker_time)
-            _set_pullback_dots(t["dot_series"], trades, marker_time, df_display["timestamp"])
+            render_ctx[tf] = (df_display, marker_time)
             main_chart.fit()
 
             atr_df = _atr_series(df_display)
@@ -2350,10 +2504,19 @@ def show_portfolio_pullback_backtest(
             )
             atr_chart.fit()
 
+        draw_overlays()
+
+    def on_admin_toggle(value: str) -> None:
+        view_state["admin"] = value == "1"
+        draw_overlays()
+
     _build_ticker_search(
         root, symbols, symbols[0], top=0.0, left=0.0, width=_PB_COL_W * 2, height=_PF_TOPBAR_H,
         on_select=render_symbol,
     )
+    # 224px = the search input's fixed 200px + its 8px padding + a gap, so the
+    # button sits immediately right of the ticker box at any window width.
+    _build_admin_button(root, top=0.0, left_px=224, height=_PF_TOPBAR_H, on_toggle=on_admin_toggle)
     render_symbol(symbols[0])
 
     # 右半边: 组合权益曲线 + 权重饼图 + 统计表 - 不随左边切换的ticker变化。
