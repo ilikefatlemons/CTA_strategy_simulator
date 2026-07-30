@@ -259,6 +259,57 @@ buy&hold of the same names.
 a working state. Any benefit now is untested, possibly luck. Same applies to the
 3xATR chandelier after A3. Neither touched (§1.4).
 
+## A6 — risk ATR moved from 5m to 30m — FIXED
+Date: 2026-07-26. Toggle `risk_atr_on_30m` (default True). Full sample, 12 tickers.
+Toggle-off reproduces the A5 baseline exactly.
+
+**Defect:** the entry stop and the chandelier trail both sized off ATR(14) on **5m**,
+while the stop's other candidate — the swing platform — is measured on **30m**. One
+`min()` comparing two timeframes, in a strategy whose thesis is a 2h-trend pullback.
+**Fix:** both risk legs read ATR(14) on 30m, from the last fully CLOSED 30m bar
+(`closed_idx["30m"][i]` already excludes the forming bar — no extra shift, no
+per-bar recompute). `extreme_since_entry` kept as-is. No multiplier changed.
+
+Both legs moved together deliberately: `rr_trigger(2) x sl_atr_mult(1.5) ==
+chandelier_mult(3.0)` places the trail at breakeven when the partial TP fires, which
+only holds if both use the same ATR. Splitting into two toggles would have measured
+two incoherent configurations.
+
+**Measured magnitude:** mean ATR(14) 30m / 5m = **2.84x** (range 2.63–2.99 over all
+12 symbols) — *above* the √6 = 2.45 random-walk expectation, since the 5m ATR is
+damped by microstructure noise. Stops widen ~2.8x.
+
+| config | return | sharpe | maxDD | batches | legs |
+|---|---|---|---|---|---|
+| A6 OFF (baseline) | +5.92% | +0.97 | −1.77% | 1507 | 2083 |
+| **A6 ON (honest)** | **+9.35%** | **+1.17** | **−2.98%** | 1418 | 1966 |
+
+**The risk measures disagree — report both.** Sharpe improves (0.97 → 1.17), but
+maxDD worsens materially (−1.77% → −2.98%) and **return/maxDD degrades 3.34 → 3.14**.
+The +58% relative return gain is roughly fully paid for by additional risk. Cause:
+**no risk-based position sizing anywhere in this engine** — each batch is 100% of the
+ticker's allocation regardless of stop distance, so a 2.8x wider stop is a 2.8x
+larger loss per stop-out with no compensating size reduction. A6 exposes this
+structural gap rather than causing it. Logged, not acted on.
+
+**Methodology note:** the dev slice (3 tickers / 3 months) gave the OPPOSITE sign
+(−1.42% → −2.62%) from the full sample. Dev is a wiring smoke-test only; it must not
+be used to judge the direction of a change.
+
+### Cross-cutting finding (updated): every fix profits by trading less
+| after | return | batches |
+|---|---|---|
+| 3.1 + 3.5 | +3.00% | 1673 |
+| A3 | +4.43% | — |
+| A5 | +5.92% | 1507 |
+| A6 | +9.35% | 1418 |
+
+255 fewer batches, +6.35 pp — roughly **+2.5 bps of portfolio return per trade
+removed**. This is the signature of a **negative per-trade edge**: if each additional
+trade subtracts value, the profit-maximising trade count is zero, and these
+"improvements" are the machine being throttled toward inactivity. Still far below
++54.9% for passively holding the same 12 names.
+
 ## ⚠️ Verification gaps — recorded, NOT performed (2026-07-26)
 Disclosed so no reader assumes these were done. None can overturn the stage
 conclusion (strategy +3.0% vs +54.9% buy&hold of its own universe; N≈40+; no OOS).
