@@ -93,10 +93,28 @@ def run_pullback_backtest(
         for tf, rule in _HIGHER_TF_RULES.items()
     }
     atr_full = atr_series(df_5m, atr_period)
+    # A6: precomputed once and indexed via closed_idx, not recomputed per 5m bar.
+    atr_30m_full = atr_series(resampled["30m"], atr_period)
 
     def closed_klines(tf: str, i: int) -> pd.DataFrame | None:
         pos = closed_idx[tf][i]
         return None if pos < 0 else resampled[tf].iloc[: pos + 1]
+
+    def risk_atr(i: int, prev_bar: bool) -> float:
+        """
+        A6: the ATR used for stop sizing (entry stop + chandelier trail).
+
+        30m: the last fully CLOSED 30m bar as of this 5m bar - `closed_idx`
+        already excludes the still-forming 30m bar, so no extra shift is needed
+        (an extra -1 would lag the risk by another 30 minutes for no reason).
+        5m: bar i-1, or bar i under the pre-2.1 forming-bar entry convention.
+        """
+        if cfg.risk_atr_on_30m:
+            pos = closed_idx["30m"][i]
+            return atr_30m_full.iloc[pos] if pos >= 0 else float("nan")
+        if prev_bar:
+            return atr_full.iloc[i - 1] if i > 0 else float("nan")
+        return atr_full.iloc[i]
 
     n = len(df_5m)
     trades: list[Trade] = []
@@ -124,11 +142,10 @@ def run_pullback_backtest(
         if cfg.entry_on_completed_bar:
             fill_idx = i
             small_5m = df_5m.iloc[:i]
-            atr_dec = atr_full.iloc[i - 1] if i > 0 else float("nan")
         else:
             fill_idx = i + 1
             small_5m = df_5m.iloc[: i + 1]
-            atr_dec = atr_full.iloc[i]
+        atr_dec = risk_atr(i, prev_bar=cfg.entry_on_completed_bar)
         fill_idx += cfg.entry_lag_bars  # Item 2 lag-curve diagnostic; 0 in the real strategy
         if fill_idx >= n:
             return None
@@ -230,8 +247,9 @@ def run_pullback_backtest(
                 # use i-1's ATR, not i's - i's ATR needs bar i's own close,
                 # so it isn't known until bar i has already happened, and
                 # can't be used to decide whether bar i's own price (checked
-                # right below) breaches a stop line that depends on it.
-                atr_prev = atr_full.iloc[i - 1] if i > 0 else float("nan")
+                # right below) breaches a stop line that depends on it. Under
+                # A6 this reads the last CLOSED 30m bar; otherwise 5m bar i-1.
+                atr_prev = risk_atr(i, prev_bar=True)
                 if pd.notna(atr_prev):
                     batch.trailing_stop = tp_manager.chandelier_stop(
                         batch.direction, batch.extreme_since_entry, atr_prev, batch.stop_loss

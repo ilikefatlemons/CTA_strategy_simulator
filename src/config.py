@@ -49,6 +49,16 @@ class BacktestConfig:
     # order the engine cannot know (G4). Default True = honest.
     trail_extreme_prev_bar: bool = True
 
+    # A6: the risk ATR (entry stop distance AND chandelier trail) is read from
+    # ATR(14) on 30m - the last fully closed 30m bar - instead of ATR(14) on 5m.
+    # The strategy's thesis is a 2h-trend pullback and the stop's other leg (the
+    # swing platform) is already measured on 30m, so a 5m ATR made one formula
+    # compare two timeframes. Both legs move together: rr_trigger(2) x
+    # sl_atr_mult(1.5) == chandelier_mult(3.0) puts the trail at breakeven when
+    # the partial TP fires, which only holds if both use the same ATR.
+    # Default True = coherent.
+    risk_atr_on_30m: bool = True
+
     # A5: the cooldown is a 2h-timescale rule but is called once per 5m bar.
     # True = evaluate it once per NEW 2h bar (release takes 3 x 2h = 6 hours, as
     # the class docstring intends). False = pre-A5, counts calls (3 x 5m = 15
