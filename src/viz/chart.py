@@ -21,6 +21,7 @@ from src.data.resample import resample_ohlcv
 from src.engine.portfolio_backtest import Trade, WeightAdjustment
 from src.engine.portfolio_pullback_backtest import PortfolioBacktestResult
 from src.rules.base import Side
+from src.viz.legend_patch import patch_legend_percent
 
 OPEN_COLOR = "#2196F3"
 TP_COLOR = "#26a69a"
@@ -388,58 +389,10 @@ def _build_return_title(chart: AbstractChart, equity_chart: AbstractChart, title
     )
 
 
-# Kill-switch for the legend % rewrite below (see _patch_legend_percent).
-_PATCH_LEGEND_PCT = True
-
-
-def _patch_legend_percent(chart: AbstractChart) -> None:
-    r"""
-    Rewrite the % in the library's built-in OHLCV legend to close-to-close.
-
-    lightweight-charts computes it as `(close - open) / open` - the hovered
-    bar's own body - which makes every gap invisible: a bar that opens 3% above
-    the prior close and then drifts down 0.1% reads "-0.10 %". Overnight gaps
-    are exactly what the exit model cares about here, so the legend should show
-    the conventional `(close - prev_close) / prev_close` instead.
-
-    Implemented as an ADDITIONAL crosshair subscriber that rewrites just that
-    one number in the already-rendered HTML. The library subscribes its own
-    `legendHandler` by reference in the Legend constructor
-    (`chart.subscribeCrosshairMove(this.legendHandler)`), so reassigning that
-    property has no effect - the chart still holds the original reference.
-    Subscribers fire in registration order and ours is registered later, so by
-    the time it runs the legend text is already on screen and only needs the
-    percentage swapped. The rendered string is otherwise untouched: same slot,
-    same `|` separator, same sign, same 2dp, same `%`.
-
-    Patching from here (rather than editing the installed package) keeps the
-    change inside this repo, version-controlled, and safe from a
-    `pip install --upgrade`. The first bar of a series has no predecessor and
-    keeps the library's intrabar value.
-    """
-    if not _PATCH_LEGEND_PCT:
-        return
-    chart.run_script(rf"""
-    {chart.id}.chart.subscribeCrosshairMove(param => {{
-        try {{
-            const L = {chart.id}.legend
-            if (!L || !L.percentEnabled || !L.candle || !param || !param.time) return
-            const series = L.handler.series
-            const cur = param.seriesData.get(series)
-            if (!cur || cur.close === undefined) return
-            const ts = L.handler.chart.timeScale()
-            const coord = ts.timeToCoordinate(param.time)
-            if (coord === null || coord === undefined) return
-            const logical = ts.coordinateToLogical(coord.valueOf())
-            if (logical === null || logical === undefined) return
-            const prev = series.dataByIndex(logical.valueOf() - 1)
-            if (!prev || !prev.close) return
-            const pct = (cur.close - prev.close) / prev.close * 100
-            const txt = `${{pct >= 0 ? '+' : ''}}${{pct.toFixed(2)}} %`
-            L.candle.innerHTML = L.candle.innerHTML.replace(/[+-]?\d+(?:\.\d+)? %/, txt)
-        }} catch (err) {{ console.log('legend pct patch:', err) }}
-    }})
-    """)
+# 图例百分比改写 (上一根 close -> 这一根 close) 已抽到 src.viz.legend_patch,
+# 好让 v3.0 的分钟线浏览器复用它而不必 import 整套回测栈。这里保留原来的私有
+# 名字, 下面 4 个调用点不用动。
+_patch_legend_percent = patch_legend_percent
 
 
 def _create_legend_div(pane: AbstractChart, attr_name: str, font_size: int = 14) -> None:

@@ -26,6 +26,14 @@ from src.config import BacktestConfig
 from src.engine.pullback_backtest import Trade, run_pullback_backtest
 from src.engine.vol_estimator import daily_closes, rolling_daily_atr_vol
 from src.performance.sharpe import sharpe_ratio
+# Definitions moved to a leaf module so the v3.0 China-futures stack can reuse
+# them without importing this file (which pulls in config/rules/resample).
+# Imported under their old private names so nothing below this line changed.
+from src.performance.trade_stats import (
+    max_drawdown as _max_dd,
+    payoff as _payoff,
+    win_loss_avgs as _win_loss_avgs,
+)
 from src.rules.sizing import InverseVolatilitySizer
 
 
@@ -144,30 +152,6 @@ def _direction_by_day(df_5m: pd.DataFrame, trades: list[Trade], days: "pd.Index"
     return direction_by_day
 
 
-def _win_loss_avgs(pnls: list[float]) -> tuple[float, float]:
-    """
-    (avg winning batch, avg losing batch), each as a fraction of capital.
-
-    These are what turn a payoff ratio into money: an expectancy of -0.31R says
-    "loses 0.31 average-losses per batch", which is only -0.16% of capital if
-    the average loss is 0.52%. The ratio alone doesn't tell you the size.
-    """
-    wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p <= 0]
-    return (
-        sum(wins) / len(wins) if wins else float("nan"),
-        sum(losses) / len(losses) if losses else float("nan"),
-    )
-
-
-def _payoff(pnls: list[float]) -> float:
-    """avg winning batch / abs(avg losing batch); nan unless both sides exist."""
-    avg_win, avg_loss = _win_loss_avgs(pnls)
-    if pd.isna(avg_win) or pd.isna(avg_loss) or avg_loss == 0:
-        return float("nan")
-    return avg_win / abs(avg_loss)
-
-
 def _benchmark_stats(daily: pd.Series, base: float | None = None) -> BenchmarkStats:
     """
     Buy&hold stats from a daily series. `base` is what the first day is measured
@@ -242,7 +226,7 @@ def _ticker_result(df_5m: pd.DataFrame, initial_capital: float, config: Backtest
     win_rate = wins / n_batches if n_batches else float("nan")
     benchmark = _benchmark_stats(daily_closes(df_5m))
     eq = result.equity_curve
-    max_drawdown = float((eq / eq.cummax() - 1.0).min()) if len(eq) else float("nan")
+    max_drawdown = _max_dd(eq)
     pnl_list = [pnl for _direction, pnl in batch_pnls.values()]
     avg_win, avg_loss = _win_loss_avgs(pnl_list)
     contrib = _direction_contributions(df_5m, result.trades, eq, initial_capital)
@@ -358,8 +342,6 @@ def run_portfolio_pullback_backtest(
     # ticker's own starting capital. It is deliberately NOT a share of the
     # portfolio's net profit - that denominator flips every sign whenever the
     # portfolio is down and blows up as it approaches zero.
-    def _max_dd(curve: pd.Series) -> float:
-        return float((curve / curve.cummax() - 1.0).min()) if len(curve) else float("nan")
 
     # Pooled trade stats across every ticker: "of all the trades the strategy
     # took, how many won". Honest as stated, but note it is UNWEIGHTED - a trade
