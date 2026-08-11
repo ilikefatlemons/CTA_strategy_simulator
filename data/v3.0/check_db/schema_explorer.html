@@ -1,0 +1,278 @@
+<title>JYDB Futures Schema</title>
+<style>
+  :root {
+    --ground:#F1F1EE; --surface:#FFFFFF; --sunk:#E7E8E3; --line:#D6D8D3;
+    --text:#171B20; --dim:#646C74; --brass:#8A5F17; --steel:#3C5F78;
+    --bar:#C9A24A;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:#0F1216; --surface:#161A20; --sunk:#1C2128; --line:#272D35;
+      --text:#DCE1E6; --dim:#88919B; --brass:#CE9A34; --steel:#7BA0BA;
+      --bar:#8A6620;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0F1216; --surface:#161A20; --sunk:#1C2128; --line:#272D35;
+    --text:#DCE1E6; --dim:#88919B; --brass:#CE9A34; --steel:#7BA0BA;
+    --bar:#8A6620;
+  }
+  :root[data-theme="light"] {
+    --ground:#F1F1EE; --surface:#FFFFFF; --sunk:#E7E8E3; --line:#D6D8D3;
+    --text:#171B20; --dim:#646C74; --brass:#8A5F17; --steel:#3C5F78;
+    --bar:#C9A24A;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--ground); color:var(--text);
+    font-family: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+    font-size:15px; line-height:1.55;
+  }
+  .wrap { max-width:1180px; margin:0 auto; padding:32px 24px 72px; }
+
+  /* ── masthead ─────────────────────────────────────────── */
+  header { border-bottom:2px solid var(--text); padding-bottom:14px; margin-bottom:0; }
+  h1 {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size:clamp(22px,3.4vw,32px); font-weight:600; letter-spacing:-0.02em;
+    margin:0; text-wrap:balance;
+  }
+  h1 .host { color:var(--brass); }
+  .tagline { color:var(--dim); font-size:14px; margin-top:6px; max-width:66ch; }
+
+  /* ── fact strip ───────────────────────────────────────── */
+  .facts {
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
+    gap:1px; background:var(--line); border:1px solid var(--line);
+    border-top:none; margin-bottom:28px;
+  }
+  .fact { background:var(--surface); padding:11px 14px; }
+  .fact dt {
+    font-size:10.5px; text-transform:uppercase; letter-spacing:0.09em;
+    color:var(--dim); margin:0 0 3px;
+  }
+  .fact dd {
+    margin:0; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size:15px; font-variant-numeric:tabular-nums; letter-spacing:-0.01em;
+  }
+
+  /* ── two-pane console ─────────────────────────────────── */
+  .console { display:grid; grid-template-columns:305px 1fr; gap:26px; align-items:start; }
+  @media (max-width:820px) { .console { grid-template-columns:1fr; } }
+
+  .rail { position:sticky; top:16px; }
+  @media (max-width:820px) { .rail { position:static; } }
+
+  .rail-head {
+    font-size:10.5px; text-transform:uppercase; letter-spacing:0.09em;
+    color:var(--dim); margin-bottom:8px;
+  }
+  #filter {
+    width:100%; padding:7px 10px; margin-bottom:10px;
+    background:var(--sunk); color:var(--text);
+    border:1px solid var(--line); border-radius:2px;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size:13px;
+  }
+  #filter::placeholder { color:var(--dim); }
+  #filter:focus { outline:2px solid var(--brass); outline-offset:1px; border-color:transparent; }
+
+  .tlist { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1px; }
+  .tlist button {
+    width:100%; text-align:left; cursor:pointer; position:relative;
+    background:var(--surface); color:var(--text);
+    border:none; border-left:3px solid transparent;
+    padding:7px 10px 8px; font:inherit; display:block;
+  }
+  .tlist button:hover { background:var(--sunk); }
+  .tlist button[aria-current="true"] { border-left-color:var(--brass); background:var(--sunk); }
+  .tlist button:focus-visible { outline:2px solid var(--brass); outline-offset:-2px; }
+  .tname {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size:12.5px; letter-spacing:-0.01em; display:block;
+  }
+  .tmeta {
+    display:flex; justify-content:space-between; align-items:center;
+    gap:8px; margin-top:4px;
+  }
+  /* row-count bar: log-scaled, so 60M and 248 both stay legible */
+  .gauge { flex:1; height:3px; background:var(--line); }
+  .gauge i { display:block; height:100%; background:var(--bar); }
+  .tcount {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size:11px; color:var(--dim); font-variant-numeric:tabular-nums;
+  }
+  .v3dot { color:var(--brass); font-size:11px; }
+
+  /* ── detail pane ──────────────────────────────────────── */
+  /* min-width:0 - a grid item defaults to min-width:auto, so the wide sample
+     table would blow the 1fr track out and scroll the whole page sideways.
+     Constrained here, the overflow lands on .scroller where it belongs. */
+  .pane { background:var(--surface); border:1px solid var(--line); min-width:0; }
+  .pane-head { padding:18px 20px 16px; border-bottom:1px solid var(--line); }
+  .pane-head h2 {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size:19px; font-weight:600; margin:0; letter-spacing:-0.02em;
+    overflow-wrap:anywhere;
+  }
+  .pane-head p { margin:8px 0 0; color:var(--dim); font-size:13.5px; max-width:70ch; }
+  .v3note {
+    margin:14px 0 0; padding:9px 12px; background:var(--sunk);
+    border-left:3px solid var(--brass); font-size:13px; max-width:70ch;
+  }
+  .v3note b {
+    color:var(--brass); font-weight:600; font-size:10.5px;
+    text-transform:uppercase; letter-spacing:0.09em; display:block; margin-bottom:2px;
+  }
+
+  .sect-label {
+    font-size:10.5px; text-transform:uppercase; letter-spacing:0.09em;
+    color:var(--dim); padding:15px 20px 9px;
+  }
+  .cols { display:grid; grid-template-columns:repeat(auto-fill,minmax(238px,1fr)); gap:1px;
+          background:var(--line); border-top:1px solid var(--line); }
+  .col { background:var(--surface); padding:7px 12px; display:flex; justify-content:space-between;
+         align-items:baseline; gap:10px; }
+  .col code {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size:12.5px; overflow-wrap:anywhere;
+  }
+  .ty {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size:10.5px; color:var(--steel); white-space:nowrap; letter-spacing:0.01em;
+  }
+  .col.nn code::after { content:"*"; color:var(--brass); }
+
+  .scroller { overflow-x:auto; border-top:1px solid var(--line); }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th, td {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    text-align:left; padding:6px 12px; white-space:nowrap;
+    border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums;
+  }
+  th { color:var(--dim); font-weight:400; font-size:10.5px;
+       text-transform:uppercase; letter-spacing:0.06em; }
+  tbody tr:last-child td { border-bottom:none; }
+
+  /* ── exchange codes ───────────────────────────────────── */
+  .xch { margin-top:30px; }
+  .xch h3 {
+    font-size:10.5px; text-transform:uppercase; letter-spacing:0.09em;
+    color:var(--dim); margin:0 0 9px; font-weight:400;
+  }
+  .chips { display:flex; flex-wrap:wrap; gap:1px; background:var(--line);
+           border:1px solid var(--line); }
+  .chip { background:var(--surface); padding:6px 12px; display:flex; gap:9px;
+          align-items:baseline; flex:1 1 auto; }
+  .chip b {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    color:var(--brass); font-size:12.5px; font-weight:600; font-variant-numeric:tabular-nums;
+  }
+  .chip span { font-size:12.5px; }
+
+  footer { margin-top:34px; padding-top:14px; border-top:1px solid var(--line);
+           color:var(--dim); font-size:12px; }
+  footer code {
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    color:var(--text); font-size:11.5px;
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>jydb <span class="host">/ Fut_*</span></h1>
+    <p class="tagline">Futures schema on the JYDB SQL Server, read live from
+       <code>sys.tables</code>. Starred columns are NOT NULL. Tables marked &#9670; feed the v3.0 work.</p>
+  </header>
+
+  <dl class="facts">
+    <div class="fact"><dt>Server</dt><dd>192.168.0.144</dd></div>
+    <div class="fact"><dt>Engine</dt><dd>SQL Server 2017</dd></div>
+    <div class="fact"><dt>Login</dt><dd>readonly</dd></div>
+    <div class="fact"><dt>Tables</dt><dd>12</dd></div>
+    <div class="fact"><dt>Columns</dt><dd>304</dd></div>
+    <div class="fact"><dt>Rows</dt><dd>77.0M</dd></div>
+    <div class="fact"><dt>Data through</dt><dd>2026-08-06</dd></div>
+  </dl>
+
+  <div class="console">
+    <nav class="rail">
+      <div class="rail-head">Tables &middot; by row count</div>
+      <input id="filter" type="search" placeholder="filter&hellip;" autocomplete="off"
+             aria-label="Filter tables by table or column name">
+      <ul class="tlist" id="tlist"></ul>
+    </nav>
+    <main class="pane" id="pane"></main>
+  </div>
+
+  <section class="xch">
+    <h3>Exchange codes &mdash; mainland venues</h3>
+    <div class="chips" id="chips"></div>
+  </section>
+
+  <footer>
+    Generated from live metadata. Query it with
+    <code>data/v3.0/check_db/jydb.py</code> &mdash; that module pins
+    <code>charset='UTF-8'</code> and repairs the returned text, because
+    <code>CP936</code> makes Chinese <code>WHERE</code> clauses match zero rows without erroring.
+  </footer>
+</div>
+
+<script>
+const DATA = {"tables": [{"name": "Fut_MemberRankByContract", "rows": 60955250, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "EndDate", "t": "datetime", "null": false}, {"n": "ExchangeCode", "t": "int", "null": false}, {"n": "ContractInnerCode", "t": "int", "null": false}, {"n": "ContractCode", "t": "varchar", "null": true}, {"n": "ReportPeriod", "t": "int", "null": false}, {"n": "RankNumber", "t": "int", "null": true}, {"n": "MemberInnerCode", "t": "int", "null": true}, {"n": "MemberCode", "t": "varchar", "null": true}, {"n": "MemberAbbr", "t": "varchar", "null": true}, {"n": "IndicatorCode", "t": "int", "null": false}, {"n": "IndicatorName", "t": "varchar", "null": true}, {"n": "IndicatorVolume", "t": "decimal", "null": true}, {"n": "ChangeVolume", "t": "decimal", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}], "desc": "Daily broker-member rankings by volume, long OI and short OI, per contract.", "v3": null, "sample": null}, {"name": "Fut_DailyQuote", "rows": 10976946, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "EndDate", "t": "datetime", "null": false}, {"n": "ReportPeriod", "t": "int", "null": false}, {"n": "ReportArea", "t": "int", "null": false}, {"n": "AdjustMark", "t": "int", "null": true}, {"n": "Exchange", "t": "int", "null": true}, {"n": "ContractName", "t": "varchar", "null": true}, {"n": "OptionCode", "t": "int", "null": true}, {"n": "Term", "t": "varchar", "null": true}, {"n": "SettlementYear", "t": "varchar", "null": true}, {"n": "SettlementMonth", "t": "varchar", "null": true}, {"n": "SettlementDate", "t": "datetime", "null": true}, {"n": "Code", "t": "int", "null": true}, {"n": "ContinuumMark", "t": "int", "null": true}, {"n": "PrevSettlePrice", "t": "money", "null": true}, {"n": "OpenPrice", "t": "money", "null": true}, {"n": "HighPrice", "t": "money", "null": true}, {"n": "LowPrice", "t": "money", "null": true}, {"n": "ClosePrice", "t": "money", "null": true}, {"n": "SettlePrice", "t": "money", "null": true}, {"n": "Volume", "t": "decimal", "null": true}, {"n": "OpenInterest", "t": "decimal", "null": true}, {"n": "OpenInterestChange", "t": "decimal", "null": true}, {"n": "Turnover", "t": "money", "null": true}, {"n": "Notes", "t": "varchar", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}, {"n": "InnerCode", "t": "int", "null": true}, {"n": "MainContractMark", "t": "int", "null": true}], "desc": "Daily OHLC, settlement, volume and open interest. Global coverage - CN, US and EU venues share this table.", "v3": "The only price history here. Daily bars only; your 1m data stays in the pkl.", "sample": {"cols": ["ID", "EndDate", "ReportPeriod", "ReportArea", "AdjustMark", "Exchange", "ContractName", "OptionCode", "Term"], "rows": [["839347121485", "2026-08-06 00:00:00", "5", "6403", "2", "15", "RI707", "412", "2707"], ["839347121394", "2026-08-06 00:00:00", "5", "6403", "2", "15", "RI705", "412", "2705"], ["839347121359", "2026-08-06 00:00:00", "5", "6403", "2", "15", "RI703", "412", "2703"], ["839347121164", "2026-08-06 00:00:00", "5", "6403", "2", "15", "RI701", "412", "2701"]]}}, {"name": "Fut_TradingHours", "rows": 2471254, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "CalendarDate", "t": "datetime", "null": false}, {"n": "IfTradingDay", "t": "int", "null": true}, {"n": "TradeBusinessDate", "t": "datetime", "null": true}, {"n": "ContractInnerCode", "t": "int", "null": false}, {"n": "VarietyInnerCode", "t": "int", "null": true}, {"n": "Exchange", "t": "int", "null": true}, {"n": "Week", "t": "int", "null": true}, {"n": "CallAuctionBeginTime", "t": "varchar", "null": true}, {"n": "CallAuctionEndTime", "t": "varchar", "null": true}, {"n": "IfOvernightTrading", "t": "int", "null": true}, {"n": "NightTradingMark", "t": "int", "null": true}, {"n": "ContinuousTradeBDate", "t": "datetime", "null": true}, {"n": "ContinuousTradeBTime", "t": "varchar", "null": true}, {"n": "ContinuousTradeETime", "t": "varchar", "null": true}, {"n": "ContinuousTradeEDate", "t": "datetime", "null": true}, {"n": "DayTradeFirstSessionBT", "t": "varchar", "null": true}, {"n": "DayTradeFirstSessionET", "t": "varchar", "null": true}, {"n": "DayTradeSeconSessionBT", "t": "varchar", "null": true}, {"n": "DayTradeSeconSessionET", "t": "varchar", "null": true}, {"n": "DayTradeThirdSessionBT", "t": "varchar", "null": true}, {"n": "DayTradeThirdSessionET", "t": "varchar", "null": true}, {"n": "InsertTime", "t": "datetime", "null": false}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}], "desc": "Per-contract, per-calendar-date session boundaries: call auction, day session, night session.", "v3": "Authoritative source for the session table that v3_sessions.py currently hardcodes.", "sample": {"cols": ["ID", "CalendarDate", "IfTradingDay", "TradeBusinessDate", "ContractInnerCode", "VarietyInnerCode", "Exchange", "Week", "CallAuctionBeginTime"], "rows": [["839344253540", "2027-04-16 00:00:00", "1", "2027-04-16 00:00:00", "2065329", "2003125", "13", "5", "20:55"], ["839344253523", "2027-04-16 00:00:00", "1", "2027-04-16 00:00:00", "2065328", "2000318", "13", "5", "20:55"], ["839344253499", "2027-04-16 00:00:00", "1", "2027-04-16 00:00:00", "2065330", "2000504", "13", "5", "20:55"], ["839344253478", "2027-04-16 00:00:00", "1", "2027-04-16 00:00:00", "2065333", "2013143", "13", "5", "20:55"]]}}, {"name": "Fut_Parameters", "rows": 2053217, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "ContractInnerCode", "t": "int", "null": false}, {"n": "TradingDay", "t": "datetime", "null": false}, {"n": "Exchange", "t": "int", "null": false}, {"n": "OptionCode", "t": "int", "null": false}, {"n": "ContractCode", "t": "varchar", "null": false}, {"n": "DealCover", "t": "money", "null": true}, {"n": "MaintainRatio", "t": "decimal", "null": true}, {"n": "LongMaintainRatio", "t": "decimal", "null": true}, {"n": "SpeculBuyMarginRate", "t": "decimal", "null": true}, {"n": "HedgBuyMarginRate", "t": "decimal", "null": true}, {"n": "ShortMaintainRatio", "t": "decimal", "null": true}, {"n": "SpeculSellMarginRate", "t": "decimal", "null": true}, {"n": "HedgSellMarginRate", "t": "decimal", "null": true}, {"n": "ChangePCTLim", "t": "decimal", "null": true}, {"n": "NonFutMemberOILimit", "t": "decimal", "null": true}, {"n": "ClientOILimit", "t": "decimal", "null": true}, {"n": "SettlePrice", "t": "money", "null": true}, {"n": "TradingCommission", "t": "decimal", "null": true}, {"n": "TradingCommissionUint", "t": "int", "null": true}, {"n": "ClearanceCharge", "t": "decimal", "null": true}, {"n": "OpeningCharge", "t": "decimal", "null": true}, {"n": "ShortClearanceCharge", "t": "decimal", "null": true}, {"n": "ShortOpeningCharge", "t": "decimal", "null": true}, {"n": "ClearanceFee", "t": "decimal", "null": true}, {"n": "DiscountRate", "t": "decimal", "null": true}, {"n": "DutiableDeliSettPrice", "t": "money", "null": true}, {"n": "BondedDeliySettPrice", "t": "money", "null": true}, {"n": "DeliveryMarginRatio", "t": "decimal", "null": true}, {"n": "DeliveryCommission", "t": "money", "null": true}, {"n": "DeliveryCommissionUnit", "t": "int", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}, {"n": "PriceCeiling", "t": "decimal", "null": true}, {"n": "PriceFloor", "t": "decimal", "null": true}, {"n": "FutMemberOILimitRate", "t": "decimal", "null": true}, {"n": "NonFutMemberOILimitRate", "t": "decimal", "null": true}, {"n": "ClientOILimitRate", "t": "decimal", "null": true}, {"n": "FutMemberOILimit", "t": "decimal", "null": true}, {"n": "HedgDealCover", "t": "decimal", "null": true}, {"n": "HedgMaintainRatio", "t": "decimal", "null": true}, {"n": "TradingLimit", "t": "decimal", "null": true}, {"n": "DeliveryForecastDeposit", "t": "decimal", "null": true}, {"n": "DeliveryForecastDepoUnit", "t": "int", "null": true}, {"n": "StorageRate", "t": "decimal", "null": true}, {"n": "StorageRateUnit", "t": "int", "null": true}, {"n": "InsertTime", "t": "datetime", "null": true}], "desc": "Daily margin ratios, price limits and position limits per contract.", "v3": "Margin and limit-up/down inputs for the R-breaker cost model.", "sample": {"cols": ["ID", "ContractInnerCode", "TradingDay", "Exchange", "OptionCode", "ContractCode", "DealCover", "MaintainRatio", "LongMaintainRatio"], "rows": [["839315089630", "2064918", "2026-08-06 00:00:00", "17", "483", "LC2703", "20637.0", "15.0", "15.0"], ["839315089628", "2061323", "2026-08-06 00:00:00", "17", "493", "PS2610", "14047.8", "13.0", "13.0"], ["839315089626", "2062370", "2026-08-06 00:00:00", "17", "420", "PT2610", "68888.0", "16.0", "16.0"], ["839315089624", "2061767", "2026-08-06 00:00:00", "17", "483", "LC2611", "21141.0", "15.0", "15.0"]]}}, {"name": "Fut_WRStatByOption", "rows": 222075, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "EndDate", "t": "datetime", "null": false}, {"n": "ExchangeCode", "t": "int", "null": false}, {"n": "ReportPeriod", "t": "int", "null": false}, {"n": "OptionCode", "t": "int", "null": false}, {"n": "OptionName", "t": "varchar", "null": true}, {"n": "UnitCode", "t": "int", "null": true}, {"n": "UnitName", "t": "varchar", "null": true}, {"n": "WRQPrior", "t": "decimal", "null": true}, {"n": "WRQIncrease", "t": "decimal", "null": true}, {"n": "WRQWriteOff", "t": "decimal", "null": true}, {"n": "WRQCurrent", "t": "decimal", "null": true}, {"n": "WRQPrediction", "t": "decimal", "null": true}, {"n": "StockPrior", "t": "decimal", "null": true}, {"n": "StockCurrent", "t": "decimal", "null": true}, {"n": "AvailableStockPrior", "t": "decimal", "null": true}, {"n": "AvailableStockCurrent", "t": "decimal", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}, {"n": "VarietyInnerCode", "t": "int", "null": true}], "desc": "Warehouse-receipt stocks by underlying variety.", "v3": null, "sample": null}, {"name": "Fut_FutureIndicators", "rows": 155183, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "ContractInnerCode", "t": "int", "null": false}, {"n": "InfoPublDate", "t": "datetime", "null": true}, {"n": "InfoSource", "t": "varchar", "null": true}, {"n": "EffectiveDate", "t": "datetime", "null": false}, {"n": "CancleDate", "t": "datetime", "null": true}, {"n": "IndicatorCode", "t": "int", "null": false}, {"n": "IndicatorName", "t": "varchar", "null": true}, {"n": "IndicatorUnit", "t": "int", "null": true}, {"n": "DataValue", "t": "money", "null": true}, {"n": "RatioValue", "t": "decimal", "null": true}, {"n": "RemarkDesc", "t": "varchar", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}], "desc": "Derived per-variety indicators: basis, term structure, warehouse stock changes.", "v3": null, "sample": null}, {"name": "Fut_TradingQuote", "rows": 109436, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "ContractInnerCode", "t": "int", "null": false}, {"n": "TradingDay", "t": "datetime", "null": false}, {"n": "ContractCode", "t": "varchar", "null": true}, {"n": "ExchangeCode", "t": "int", "null": true}, {"n": "OptionCode", "t": "int", "null": true}, {"n": "SeriesFlag", "t": "int", "null": true}, {"n": "PrevSettlePrice", "t": "money", "null": true}, {"n": "PrevClosePrice", "t": "money", "null": true}, {"n": "OpenPrice", "t": "money", "null": true}, {"n": "HighPrice", "t": "money", "null": true}, {"n": "LowPrice", "t": "money", "null": true}, {"n": "ClosePrice", "t": "money", "null": true}, {"n": "ChangeOfCTPS", "t": "money", "null": true}, {"n": "ChangePCTCTPS", "t": "decimal", "null": true}, {"n": "ChangeOfClosePrice", "t": "money", "null": true}, {"n": "ChangePCTClosePrice", "t": "decimal", "null": true}, {"n": "SettlePrice", "t": "money", "null": true}, {"n": "ChangeOfSettPrice", "t": "money", "null": true}, {"n": "ChangePCTSettPrice", "t": "decimal", "null": true}, {"n": "OpenInterest", "t": "decimal", "null": true}, {"n": "ChangeOfOpenInterest", "t": "decimal", "null": true}, {"n": "ChangePCTOpenInterest", "t": "decimal", "null": true}, {"n": "TurnoverVolume", "t": "decimal", "null": true}, {"n": "ChangeOfTurnoverVolume", "t": "decimal", "null": true}, {"n": "ChangePCTTurnoverVolume", "t": "decimal", "null": true}, {"n": "TurnoverValue", "t": "money", "null": true}, {"n": "ChangeOfTurnoverValue", "t": "money", "null": true}, {"n": "ChangePCTTurnoverValue", "t": "decimal", "null": true}, {"n": "BasisValue", "t": "decimal", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}, {"n": "MainContractMark", "t": "int", "null": true}, {"n": "BasisAnnualYield", "t": "decimal", "null": true}], "desc": "Continuous and main-contract stitched quote series.", "v3": "Pre-stitched main-contract series - worth comparing against your own roll logic.", "sample": null}, {"name": "Fut_ContractMain", "rows": 59409, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "ContractInnerCode", "t": "int", "null": false}, {"n": "ContractCode", "t": "varchar", "null": false}, {"n": "ContractName", "t": "varchar", "null": true}, {"n": "ExchangeCode", "t": "int", "null": false}, {"n": "ContractType", "t": "int", "null": true}, {"n": "OptionCode", "t": "int", "null": false}, {"n": "ContractMultiplier", "t": "varchar", "null": true}, {"n": "PriceUnit", "t": "varchar", "null": true}, {"n": "LittlestChangeUnit", "t": "varchar", "null": true}, {"n": "ChangePCTLimit", "t": "varchar", "null": true}, {"n": "CurrencyCode", "t": "int", "null": true}, {"n": "DeliveryYear", "t": "varchar", "null": true}, {"n": "DeliveryMonth", "t": "varchar", "null": true}, {"n": "EffectiveDate", "t": "datetime", "null": true}, {"n": "LastTradingDate", "t": "datetime", "null": true}, {"n": "DeliveryDate", "t": "datetime", "null": true}, {"n": "LastDeliveryDate", "t": "datetime", "null": true}, {"n": "DeliveryMethod", "t": "int", "null": true}, {"n": "DeliveryGrades", "t": "text", "null": true}, {"n": "MinMarginRatio", "t": "decimal", "null": true}, {"n": "TradingCommission", "t": "varchar", "null": true}, {"n": "DeliveryCommission", "t": "varchar", "null": true}, {"n": "SettPriceCode", "t": "int", "null": true}, {"n": "SettPriceDesc", "t": "text", "null": true}, {"n": "DeliSettPriceCode", "t": "int", "null": true}, {"n": "DeliSettPriceDesc", "t": "text", "null": true}, {"n": "ListBasisPrice", "t": "money", "null": true}, {"n": "ChangePCTListPrice", "t": "decimal", "null": true}, {"n": "ContractState", "t": "int", "null": true}, {"n": "ChangeReason", "t": "varchar", "null": true}, {"n": "ContractMonth", "t": "varchar", "null": true}, {"n": "ExchangeDate", "t": "varchar", "null": true}, {"n": "LastTradingDateDesc", "t": "varchar", "null": true}, {"n": "LastTradingTimeDesc", "t": "varchar", "null": true}, {"n": "DeliveryDateDesc", "t": "varchar", "null": true}, {"n": "LastDeliveryDateDesc", "t": "varchar", "null": true}, {"n": "ContractIntroduction", "t": "text", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}, {"n": "CMValue", "t": "int", "null": true}, {"n": "ContractAbbr", "t": "varchar", "null": true}, {"n": "IfReal", "t": "int", "null": true}, {"n": "InitialMarginRatio", "t": "decimal", "null": true}, {"n": "VarietyInnerCode", "t": "int", "null": true}, {"n": "ContinueContType", "t": "int", "null": true}, {"n": "ISIN", "t": "varchar", "null": true}], "desc": "The contract master: code, Chinese name, exchange, multiplier, tick size, delivery and last-trading dates.", "v3": "Contract multiplier and tick size for position sizing and slippage.", "sample": {"cols": ["ID", "ContractInnerCode", "ContractCode", "ContractName", "ExchangeCode", "ContractType", "OptionCode", "ContractMultiplier", "PriceUnit"], "rows": [["839230522925", "2067307", "UC110926", "新交所FlexC美元兑离岸人民币期货26年09月11日", "33", "2", "415", "1张100000美元", "离岸人民币/美元"], ["839159652925", "2067306", "CBF0I00", "五年期中国国债期货主力合约", "32", "3", "501", "500,000", "百分比"], ["839159622353", "2067305", "CBF0000", "五年期中国国债期货指数", "32", "3", "501", "500,000", "百分比"], ["839159224106", "2067304", "CBF0Y00", "五年期中国国债期货连续合约", "32", "3", "501", "500,000", "百分比"]]}}, {"name": "Fut_Statute", "rows": 5782, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "InfoPublDate", "t": "datetime", "null": false}, {"n": "ActualizationDate", "t": "datetime", "null": true}, {"n": "IfActualization", "t": "varchar", "null": true}, {"n": "IssuanceOrg", "t": "varchar", "null": true}, {"n": "StatuteType", "t": "varchar", "null": true}, {"n": "Title", "t": "varchar", "null": true}, {"n": "Keyword", "t": "varchar", "null": true}, {"n": "Content", "t": "text", "null": true}, {"n": "Notes", "t": "varchar", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}], "desc": "Exchange rule documents and their revision history.", "v3": null, "sample": null}, {"name": "Fut_ConversionFactors", "rows": 864, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "InfoPublDate", "t": "datetime", "null": true}, {"n": "IssuanceOrg", "t": "int", "null": true}, {"n": "ContractInnerCode", "t": "int", "null": true}, {"n": "SerialNumber", "t": "int", "null": true}, {"n": "IBMarketInnerCode", "t": "int", "null": true}, {"n": "SHExchangeInnerCode", "t": "int", "null": true}, {"n": "SZExchangeInnerCode", "t": "int", "null": true}, {"n": "CouponRate", "t": "decimal", "null": true}, {"n": "ConversionFactors", "t": "decimal", "null": true}, {"n": "XGRQ", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}], "desc": "Deliverable-grade conversion factors, mainly for bond futures.", "v3": null, "sample": null}, {"name": "Fut_FuturesContract", "rows": 662, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "ContractName", "t": "varchar", "null": false}, {"n": "ContractOption", "t": "int", "null": false}, {"n": "Exchange", "t": "int", "null": false}, {"n": "TradingCode", "t": "varchar", "null": true}, {"n": "ContractType", "t": "int", "null": true}, {"n": "ContractMulti", "t": "varchar", "null": true}, {"n": "PriceUnit", "t": "varchar", "null": true}, {"n": "LittlestChangeUnit", "t": "varchar", "null": true}, {"n": "ChangePCTLim", "t": "varchar", "null": true}, {"n": "ContractMonth", "t": "varchar", "null": true}, {"n": "ExchangeDate", "t": "varchar", "null": true}, {"n": "LastTradingDate", "t": "varchar", "null": true}, {"n": "LastTradingTime", "t": "varchar", "null": true}, {"n": "DeliveryDate", "t": "varchar", "null": true}, {"n": "LastDeliveryDate", "t": "varchar", "null": true}, {"n": "DeliverableGrades", "t": "text", "null": true}, {"n": "MaintainRatio", "t": "decimal", "null": true}, {"n": "Fee", "t": "varchar", "null": true}, {"n": "SettlementPrice", "t": "text", "null": true}, {"n": "FinalSettlementPrice", "t": "text", "null": true}, {"n": "DeliveryMethod", "t": "int", "null": true}, {"n": "ContractIntroduction", "t": "text", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}, {"n": "ContractInnerCode", "t": "int", "null": false}, {"n": "NightTradingTime", "t": "varchar", "null": true}, {"n": "ContractState", "t": "int", "null": true}, {"n": "DeliveryUnit", "t": "int", "null": true}, {"n": "DeliveryUnitValue", "t": "int", "null": true}, {"n": "CallAuctionTime", "t": "varchar", "null": true}], "desc": "Variety-level contract specifications.", "v3": null, "sample": null}, {"name": "Fut_MemberInfo", "rows": 248, "columns": [{"n": "ID", "t": "bigint", "null": false}, {"n": "InfoPublDate", "t": "datetime", "null": true}, {"n": "InfoSource", "t": "varchar", "null": true}, {"n": "ExchangeCode", "t": "int", "null": false}, {"n": "MemberInnerCode", "t": "int", "null": false}, {"n": "MemberCode", "t": "varchar", "null": true}, {"n": "MemberChiName", "t": "varchar", "null": true}, {"n": "MemberAbbr", "t": "varchar", "null": true}, {"n": "MemberType", "t": "int", "null": true}, {"n": "MinSettleReserve", "t": "money", "null": true}, {"n": "IfEffected", "t": "tinyint", "null": true}, {"n": "ExecuteDate", "t": "datetime", "null": false}, {"n": "CancelDate", "t": "datetime", "null": true}, {"n": "ChangeType", "t": "int", "null": true}, {"n": "RemarkDesc", "t": "varchar", "null": true}, {"n": "UpdateTime", "t": "datetime", "null": false}, {"n": "JSID", "t": "bigint", "null": false}], "desc": "Broker-member reference data.", "v3": null, "sample": null}], "exchanges": [{"code": "10", "name": "上海期货交易所"}, {"code": "11", "name": "上海国际能源交易中心"}, {"code": "13", "name": "大连商品交易所"}, {"code": "15", "name": "郑州商品交易所"}, {"code": "17", "name": "广州期货交易所"}, {"code": "20", "name": "中国金融期货交易所"}, {"code": "51", "name": "中国金融期货交易所"}]};
+const fmt = n => n.toLocaleString('en-US');
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+const maxLog = Math.log10(Math.max(...DATA.tables.map(t => t.rows)) + 1);
+let active = DATA.tables[0].name;
+
+function renderRail(q = '') {
+  const ul = document.getElementById('tlist');
+  const hits = DATA.tables.filter(t =>
+    t.name.toLowerCase().includes(q) ||
+    t.columns.some(c => c.n.toLowerCase().includes(q)));
+  ul.innerHTML = hits.map(t => `
+    <li><button data-t="${esc(t.name)}" aria-current="${t.name === active}">
+      <span class="tname">${esc(t.name)}${t.v3 ? ' <span class="v3dot">&#9670;</span>' : ''}</span>
+      <span class="tmeta">
+        <span class="gauge"><i style="width:${(Math.log10(t.rows + 1) / maxLog * 100).toFixed(1)}%"></i></span>
+        <span class="tcount">${fmt(t.rows)}</span>
+      </span>
+    </button></li>`).join('')
+    || '<li style="padding:10px;color:var(--dim);font-size:13px">no match</li>';
+  ul.querySelectorAll('button').forEach(b =>
+    b.onclick = () => { active = b.dataset.t; renderRail(q); renderPane(); });
+}
+
+function renderPane() {
+  const t = DATA.tables.find(x => x.name === active);
+  let html = `<div class="pane-head">
+      <h2>${esc(t.name)}</h2>
+      <p>${esc(t.desc)}</p>
+      ${t.v3 ? `<div class="v3note"><b>Bears on v3.0</b>${esc(t.v3)}</div>` : ''}
+    </div>
+    <div class="sect-label">${t.columns.length} columns &middot; ${fmt(t.rows)} rows</div>
+    <div class="cols">${t.columns.map(c => `
+      <div class="col${c.null ? '' : ' nn'}">
+        <code>${esc(c.n)}</code><span class="ty">${esc(c.t)}</span>
+      </div>`).join('')}</div>`;
+
+  if (t.sample) {
+    html += `<div class="sect-label">Sample rows</div><div class="scroller"><table>
+      <thead><tr>${t.sample.cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${t.sample.rows.map(r =>
+        `<tr>${r.map(v => `<td>${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table></div>`;
+  }
+  document.getElementById('pane').innerHTML = html;
+}
+
+document.getElementById('chips').innerHTML = DATA.exchanges.map(x =>
+  `<div class="chip"><b>${esc(x.code)}</b><span>${esc(x.name)}</span></div>`).join('');
+
+document.getElementById('filter').addEventListener('input', e =>
+  renderRail(e.target.value.trim().toLowerCase()));
+
+renderRail();
+renderPane();
+</script>
