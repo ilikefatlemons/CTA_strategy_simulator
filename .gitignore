@@ -7,12 +7,16 @@ venv/
 env/
 .env
 .vscode
-# raw fetched market data - regenerable via src/data/fetch_alpaca.py, keep repo light
-data/raw/*.csv
-# backtest output - regenerable via src/run_phase2.py, src/run_phase3.py
-data/phase2_trades.csv
-data/phase3_trades.csv
-data/phase3_weights.csv
+# market data and backtest output - regenerable, and 50+ GB of it, so only the
+# source (*.py, *.ipynb, *.html) and the notes (*.md) under data/ are tracked.
+# Raw bars: src/data/fetch_alpaca.py (v1.0-v2.1), JYDB pull via
+# data/v3.0/check_db/jydb.py (v3.0). Cleaned bars: src/data/prepare_v3_minute.py.
+data/raw/
+data/**/*.pkl
+data/**/*.parquet
+data/**/*.csv
+# per-ticker QC scratch output - rebuilt by the scripts in data/v3.0/tests/
+data/v3.0/test_data/
 
 .ipynb_checkpoints/
 .DS_Store
