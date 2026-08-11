@@ -1,0 +1,528 @@
+# v3.0 R-Breaker 突破策略（回测引擎 + 图表叠加 + 中文统计面板）
+
+> **文档性质**：实施方案（NOTE = 自己的综合与决策，非外部研究）。
+> **定稿日期**：2026-08-05
+> **配套研究**：`RSCH-R-breaker&Turtle.md`（六线机制与出处声明）、
+> `RSCH(NOTE)-策略相关性评级.md`（日界价位锚定突破类评分 9.0）、
+> `../中国商品期货特殊规则/RSCH-期货Intro规则.md`（时段与交易日定义）。
+> **数据前置**：`data/v3.0/data_quality_checklist.md`、`ticker_exclusion_log.md`、
+> `report/v3.0/数据质量报告.md`。
+>
+> 本文覆盖的是 R-Breaker 的**突破半边**。反转半边（Senter/Benter 的持仓反手）
+> 不在本次范围内，前端 `Reversal` 按钮为占位。§10 记录了本次刻意不做的事
+> 和已知风险，后续调参前应先读那一节。
+
+## Context
+
+v3.0 的数据层已经建好（`data/v3.0/clean_1m/{SYM}.parquet`，59 个中国期货品种、5590 万根 1 分钟 bar），图表层也有了一个纯浏览器（`src/run_v3_minute_chart.py`）—— 但 **v3.0 还没有任何策略引擎**。现有的 v2.1 引擎跑的是美股 5 分钟数据（`timestamp` 列 + 纽约时区 + 单一交易时段），schema 和时段模型都对不上，不能直接复用。
+
+这次要建的是 R-Breaker 的**突破半边**：用前一交易日的 H/L/C 投射六条水平线，价格上穿 Bbreak 做多、下破 Sbreak 做空，只用追踪止损离场，时段结束强制平仓。反转半边（Senter/Benter 的持仓反手逻辑）本次不实现，但六条线全部计算并可显示，前端的 `Reversal` 按钮先做成占位。
+
+产出是一个能在 K 线图上直接看到「线 / 入场出场箭头 / 中文统计面板」的桌面窗口，用来对策略做直观检验。
+
+---
+
+## 已确认的决策
+
+| # | 决策 | 取值 |
+|---|---|---|
+| 1 | 止损公式 | `giveback = (Bbreak − Senter) − (Bbreak − Ssetup)/d + MFE_geo·(1 − 1/d)`，`d = 3` |
+| 2 | MFE 基准 | `MFE_geo = peak − Bbreak`（几何量，只驱动止损位）；盈亏另用实际成交价 `entry_price`；两者之差 **全额计入盈亏、零传导到止损位** |
+| 3 | 入场触发 | 只要 bar i−1 的价格穿越线即触发 → `high[i−1] > Bbreak` 做多 / `low[i−1] < Sbreak` 做空；**成交在 bar i 的 open** |
+| 4 | 重复入场 | **每个交易时段最多一笔**（白盘一笔、夜盘一笔，一天最多两笔）。止损或收盘平仓后，本时段收工 |
+| 5 | 回测区间 | 过去一年（runner 的 `START`/`END`） |
+| 6 | 最大回撤基准 | 逐根 mark-to-market 权益曲线 |
+| 7 | 指标线 toggle | 左上角一个开关，开/关全部六条线；与右上角 Breakout 按钮**互相独立** |
+| 8 | 交易成本 | `cost_bps = 0.0`，留旋钮 |
+
+---
+
+## 1. 策略数学
+
+六条线，由**前一交易日**（完整 `trading_date` = 夜盘 + 白盘）的 H/L/C 算出，当日固定，次日重算。系数 `f1=0.35, f2=0.07, f3=0.25`：
+
+```
+Ssetup = H + f1·(C − L)              Bsetup = L − f1·(H − C)
+Senter = ((1+f2)/2)·(H + C) − f2·L   Benter = ((1+f2)/2)·(L + C) − f2·H
+Bbreak = Ssetup + f3·(Ssetup − Bsetup)   Sbreak = Bsetup − f3·(Ssetup − Bsetup)
+```
+
+恒等式（写成测试来钉住）：`Ssetup − Bsetup = (1+f1)(H−L)`，因此 `Bbreak − Ssetup = f3(1+f1)(H−L) = 0.3375·R`。**这就是原始公式里那个 0.3375 的来源。**
+
+代入 `MFE_geo = peak − Bbreak` 后止损收敛成闭式：
+
+```
+多头:  stop = Senter + (peak   − Ssetup)/d      peak   = 入场以来 high 的运行最大值，下限 Bbreak
+空头:  stop = Benter − (Bsetup − trough)/d      trough = 入场以来 low  的运行最小值，上限 Sbreak
+```
+
+对称性由 `p ↦ −p, (H,L,C) ↦ (−L,−H,−C)` 的反射保证（`Ssetup ↔ −Bsetup`、`Senter ↔ −Benter`、`Bbreak ↔ −Sbreak`）。`peak` 单调不减 ⇒ 多头 stop 单调不减，是真正的追踪止损，永不放松。
+
+**注意 `peak` 的口径**：实现为「**入场以来**的运行极值」，不是「当日最高价」。因为一个 `trading_date` 含两个时段，夜盘的高点若算进白盘那笔的 `peak`，止损会在入场瞬间就被顶到不合理的高度，与「giveback from peak」的语义冲突。信号 bar（i−1）的 high 不计入，从入场 bar（i）开始计。若你本意是日内累计高点，这是一行改动。
+
+盈亏用实际成交价：`pnl = (exit_px − entry_px)/entry_px`（多），`entry_px = open[i]`。`open[i]` 与 `Bbreak` 的差额自然落进盈亏，止损位则完全活在「线空间」里，与成交价无关 —— 这正是决策 2。
+
+---
+
+## 2. 新增文件
+
+| 路径 | 内容 |
+|---|---|
+| `src/strategy/__init__.py` | 空 |
+| `src/strategy/rbreaker.py` | `RBreakerParams`(f1,f2,f3,d) / `RBreakerConfig` / `rbreaker_lines()` / `trail_stop_long/short()` |
+| `src/data/v3_sessions.py` | 加载 + 脏数据过滤 + 时段推导 + 前日 OHLC join + `prepare()` |
+| `src/engine/rbreaker_backtest.py` | `RBTrade` / `RBreakerResult` / `run_rbreaker_backtest()` |
+| `src/performance/trade_stats.py` | `win_loss_avgs` / `payoff` / `max_drawdown` |
+| `src/performance/rbreaker_stats.py` | `RBreakerStats` / `compute_stats()` / `panel_rows()` |
+| `src/viz/lwc_helpers.py` | `to_ns()` / `drop_legend_row()` / `UI_FONT` / `UI_FONT_CJK` / `step_rows()` |
+| `src/viz/chart_rbreaker.py` | 叠加层应用 |
+| `src/run_v3_rbreaker_chart.py` | runner（`# 调参区` 块） |
+| `tests/test_rbreaker_{lines,sessions,backtest,stats}.py` | pytest |
+| `tests/test_rbreaker_smoke.py` | 59 品种脚本式冒烟（仿 `test_v3_minute_smoke.py`） |
+
+**时段推导放 `src/data/` 而不是 `src/strategy/`**：交易所日历是数据层事实，不是策略选择；后续每个 v3.0 策略都要用。仓库已有先例（`src/data/resample.py`、`higher_tf_indicators.py::session_window_starts`）。`v3_` 前缀避免和 v2.1 的美股时段辅助混淆。
+
+**`trade_stats.py` 抽取**：`_payoff` / `_win_loss_avgs` / `_max_dd` 现在埋在 `src/engine/portfolio_pullback_backtest.py:147/163/361` 里，而那个模块会连带 import 整套 v2.1 栈（`src.config`、`src.rules.*`、`src.data.resample`）。仓库对这个问题已经有既定做法 —— `src/viz/chart.py:392-394` 把 `_patch_legend_percent` 抽到 `legend_patch.py`，注释写明「好让 v3.0 的分钟线浏览器复用它而不必 import 整套回测栈」。照做：函数移到叶子模块，原处留 `_payoff = payoff` 之类的别名，v2.1 调用点一行不动。
+
+### 对现有文件的改动（三处，行为等价）
+
+`src/viz/chart_minute.py`：
+1. 抽出 `load_minute_raw()`，把 `load_minute` 改成薄包装 —— 签名和输出保持逐字节一致（`tests/test_v3_minute_smoke.py` 依赖它）。
+2. 抽出 `build_minute_chart(title) -> Chart`（现 `show_minute_candles` 的 237-257 行：`Chart(...)` + legend + time_scale + crosshair + price_line + candle_style + volume_config + `patch_legend_percent`），两个 app 共用，保证视觉一致。
+3. `UI_FONT` 移到 `lwc_helpers.py`，原名 re-import，调用点不动。
+
+**直接 import 复用**：`CLEAN_DIR`、`build_ticker_search`、`patch_legend_percent`。
+**绝不 import `src/viz/chart.py`**（会拖进整套 v2.1）—— 只复制它的**写法**：`_to_ns`(chart.py:44)、legend 行移除的 try/catch(chart.py:216-226)、`_build_admin_button` 的按钮形状(chart.py:1746-1778)、`_stats_page` 的裸块包装(chart.py:2208)。
+
+---
+
+## 3. 数据准备（`src/data/v3_sessions.py`）
+
+顺序固定：**脏数据过滤 → 时段推导 → 日聚合**。反了的话，伪造段的平价或假日压缩 bar 会污染次日的六条线。
+
+**Step 1 — 1 分钟连续段**（逐字沿用 `data/v3.0/tests/qc_fake_session_survivors.py:39-43`）：
+```python
+gap = df.index.to_series().diff() > pd.Timedelta("1min")
+tdc = df["trading_date"].ne(df["trading_date"].shift())
+run_id = (gap | tdc).cumsum()
+```
+
+**Step 2 — 丢掉伪造段**。逐段算 `bars`、`traded = (volume>0).sum()`、`vol = volume.sum()`，命中即丢：
+```
+(bars >= 20 and traded <= 2) or (vol == 0)
+```
+必须是 `traded <= 2` 而不是 `vol == 0`：那 643 条残留（`data/v3.0/test_data/qc_fake_session_survivors.csv`）的 `vol > 0`，正是因为被错标的集合竞价 bar 带着真实成交量把整段「救活」了（如 AU 2025-10-09 00:00-02:30：151 根 bar、1 根有成交、单根 +4.06%）。返回被丢段的明细 DataFrame，**绝不静默丢弃**。
+
+**Step 3 — 时段切分**，一次扫描：
+```python
+new_session = df["trading_date"].ne(df["trading_date"].shift()) | \
+              (df.index.to_series().diff() > pd.Timedelta("3h"))
+session_id       = new_session.cumsum()
+is_session_first = session_id.ne(session_id.shift())
+is_session_last  = session_id.ne(session_id.shift(-1))
+```
+
+**Step 4 — 断言**：`trading_date` 内不得出现落在 `(2h15m, 6h)` 区间的间隔。命中就抛错。
+
+**3h 这个常数为什么合法。** docs 的硬规则是「不许写死时段时间或每日 bar 数」—— 这两样都没写死：没有时钟点，没有 bar 数。写死的是一个落在**实测空带**里的间隔阈值。全历史实测：日内最大间隔是 2h01m（商品午休），夜盘→白盘最小间隔是 6h31m（AU 02:30→09:01），中间 2.02h–6.52h 完全没有样本，两侧各有 3 倍余量。周末/假日的夜→日间隔可达 58h。配一条运行时断言即可。
+
+（考虑过全推导方案并否决：按间隔比值聚类会因为 0.27h→2.02h 是 7.5 倍、大于 2.02h→6.52h 的 3.2 倍而把 10:16-10:30 的小节休息切成独立时段；按绝对差聚类对 31 个无夜盘品种失效 —— 它们的间隔集合只有 {0.27, 2.02}，最大跳变 1.75h，会把午休切开。任何修补都得引入下限，引入下限后推导就没有意义了。）
+
+这套切法自动覆盖：2020 年 2–5 月全市场停夜盘（该 `trading_date` 无 21:00 段，日内最大间隔 2.02h < 3h → 单时段）；中金所 IF/IC/IH/IM/T/TF/TS/TL（唯一间隔 1h31m → 单时段，两个时代都对）；周五夜盘归下周一（54.5h / 58.0h 间隔，正确切开）；AU/AG/SC 跨零点（21:00→02:30 是一条 331 根的连续段 → 单时段，末根 02:30）；09:00 vs 09:01 的集合竞价差异（无关，没有任何逻辑读时钟）。
+
+**Step 5 — 前日 OHLC**（在**复权后**的帧上做）：
+```python
+agg  = df.groupby("trading_date").agg(H=("high","max"), L=("low","min"),
+                                      C=("close","last"), bars=("close","size")).sort_index()
+prev = agg.shift(1)
+gap_days = (agg.index.to_series() - agg.index.to_series().shift(1)).dt.days
+valid = prev["bars"].ge(30) & gap_days.le(15) & prev[["H","L","C"]].notna().all(axis=1) \
+        & (agg.index >= first_trading_date_at_or_after(START))
+lines = rbreaker_lines(prev["H"], prev["L"], prev["C"], params).where(valid, np.nan)
+```
+再用 `day_idx = agg.index.get_indexer(df["trading_date"])` 一次整数 gather 广播到每根 bar。
+
+- 必须用**复权价**。K 在 RB 全历史变了 50 次；换月日用裸价会让前日 H/L/C 与当日 bar 处在不同价格尺度上，每个换月日都制造一次必然突破。K 在 `trading_date` 内恒定（实测 RB 4017 个交易日中 0 个例外），所以日聚合内部自洽。
+- 窗口首日无参照 → `valid=False` → 六线 NaN → 入场分支被 `valid[D]` 挡住，无需特例。
+- `max_gap_days=15`：最长的合法休市是春节，约 10 个日历日（2024-02-09 → 2024-02-19），15 留余量又能挡住真正的数据洞。
+- **窗口 padding**：`prepare()` 实际加载 `[START − 10 日, END]`，好让 START 当天就有参照；但 `valid` 里那个 `agg.index >= first_trading_date_at_or_after(START)` 条件保证 padding 段永不产生交易，因此回测区间与显示区间严格对齐，padding 对用户不可见。
+- **k0 必须共享**：`k0` 取**显示窗口首根**（不是 padding 首根）的 K，同一个值同时用于策略帧和图表帧，否则画出来的线和蜡烛对不上。这是最容易引入的一个 bug。
+
+---
+
+## 4. 回测主循环（`src/engine/rbreaker_backtest.py`）
+
+全部预取成 numpy 数组。实测：1.3M 根 bar 用 numpy 标量循环 **0.34 s**，用 `df.iloc[i]` 逐行取 **10.4 s**（30 倍）。
+
+```
+pos = 0; entry_i = -1; entry_px = nan; theo = nan; peak = nan; capital = 1.0
+sess_used = set()            # 决策 4: 每个 session_id 最多一笔
+
+for i in 0 .. n-1:
+    D = day[i]; S = sid[i]; acted = False        # 一根 bar 只做一件事
+
+    # ── 1. 出场 ── 仅当持仓在 bar i 之前就已建立
+    if pos != 0 and entry_i < i:
+        if pos == +1:
+            stop = SE[D] + (peak - SS[D]) / d          # 读: peak 只到 i-1
+            if l[i] <= stop:                            # 读: low[i]
+                px = min(stop, o[i]);  close(i, px, "TRAIL");        acted = True
+            elif last_of_sess[i]:
+                px = c[i];             close(i, px, "SESSION_END");  acted = True
+        else:
+            stop = BE[D] - (BS_[D] - peak) / d          # peak 此时是运行最小值
+            if h[i] >= stop:
+                px = max(stop, o[i]);  close(i, px, "TRAIL");        acted = True
+            elif last_of_sess[i]:
+                px = c[i];             close(i, px, "SESSION_END");  acted = True
+        trail_line[i] = stop                            # 图表用: 本根被测试的止损位
+
+    # ── 2. 折入本根极值 —— 必须在测试之后 ──  (对齐 pullback_backtest.py:296-300)
+    if pos != 0:
+        peak = max(peak, h[i]) if pos == +1 else min(peak, l[i])
+
+    # ── 3. 入场 ──
+    if pos == 0 and not acted and valid[D] and S not in sess_used \
+       and not last_of_sess[i] and not first_of_sess[i]:
+        j = i - 1                                       # 读: 只读已收盘的 i-1
+        if   h[j] > BB[D]:  open_(i, +1, o[i], theo=BB[D]);  sess_used.add(S)
+        elif l[j] < SBK[D]: open_(i, -1, o[i], theo=SBK[D]); sess_used.add(S)
+
+    # ── 4. 逐根 mark-to-market ──
+    equity[i] = capital * (1 + move(c[i]) / entry_px) if pos != 0 and entry_i <= i else capital
+
+open_(i, dir, px, theo):
+    pos, entry_i, entry_px = dir, i, px
+    peak = theo                 # 决策 2: 种在理论线上，不是成交价
+    # 第 2 步随后会在同一根折入 h[i]/l[i]，所以 bar i+1 的 stop 由 max(theo, h[i]) 决定
+
+close(i, px, reason):
+    pnl = (px - entry_px)/entry_px * (+1 if pos==+1 else -1) - cost_bps/1e4
+    capital *= 1 + pnl;  trades.append(RBTrade(...));  pos = 0; entry_i = -1
+```
+
+`sess_used` 在每个新 `session_id` 上不需要清空 —— session_id 全局单调递增，用 set 或直接记 `last_used_sid` 都行。
+
+### 无未来函数逐行审计
+
+| 步骤 | 读取 | 触及的最新 bar |
+|---|---|---|
+| 止损位 | `SE[D]`/`SS[D]`（来自 D−1 日 OHLC）、`peak` | **i−1** |
+| 止损触发判定 | `l[i]` / `h[i]` | i（这就是事件本身） |
+| 跳空补价 | `o[i]` | i（成交决策发生的那一刻已知） |
+| 收盘平仓 | `last_of_sess[i]`、`c[i]` | i（形状是静态的；close 是成交价） |
+| 极值更新 | `h[i]`/`l[i]` —— **在测试之后** | i，但只影响 i+1 |
+| 入场信号 | `h[j]`/`l[j]`, j=i−1；`BB[D]`/`SBK[D]` | **i−1** |
+| 入场成交 | `o[i]` | i（开盘价） |
+
+唯一结构上危险的是极值更新，已放在出场测试之后并带 `pos != 0` 守卫 —— 与 `pullback_backtest.py:296-300` 同形。`is_session_last` 是窗口形状的属性，循环开始前就已知，不是任何价格的函数，在 docstring 里写明以免被误判为未来函数。
+
+### 特例
+
+- **同根既触止损又是时段末根** → 止损优先（`if/elif`）。机械上更早发生，价格通常更差；对应 v2.1 的 `pessimistic_both_hit`。
+- **跳空补价** `min(stop, open)` 多 / `max(stop, open)` 空 —— 同 `pullback_backtest.py:191-197`。10:15→10:31、11:30→13:31 以及每个时段边界都是**零根 bar**（`data_quality_checklist.md` B3/B4 已确认），那里的跳空是真实的。
+- **一根一动作**：`acted` 挡住出场根上再入场；`entry_i < i` 挡住成交根上就止损。二者保证每笔 `exit_bar_idx > entry_bar_idx`。
+- **时段首根不入场**：bar i−1 属于上一时段（可能隔 6 小时甚至 58 小时，且可能是不同 `trading_date` 的不同线）。代价是让掉「开盘即越线」的那一根 —— 但只让一根：时段首根的 high 越线后，次根的 open 就成交，语义仍然成立。
+- **方向不可能冲突**：`Bbreak − Sbreak = (1+2f3)(Ssetup−Bsetup) = 1.5×1.35R > 0`，多空条件不可能同时为真。
+
+---
+
+## 5. 统计（`src/performance/rbreaker_stats.py`）
+
+| 面板行 | 算法 |
+|---|---|
+| `{SYM} · R-Breaker 突破` | 标题 |
+| `可交易日` | `int(valid.sum())` —— 窗口内有合法前日参照的 `trading_date` 数 |
+| `成交 N (多a/空b)` | `len(trades)`，按 `direction` 拆 |
+| `累计净收益` | `equity[-1]/equity[0] − 1` |
+| `最大回撤` | `abs(max_drawdown(equity))`，MTM 曲线（决策 6） |
+| `胜率` | `sum(p > 0)/len(p)` |
+| `盈亏比` | `payoff` = `avg_win/abs(avg_loss)` |
+| `策略夏普比` | 见下 |
+| `离场 止损/收盘` | `Counter(reason)` → `TRAIL` / `SESSION_END` |
+| `平均持有 N 根` | `mean(exit_bar_idx − entry_bar_idx)`，四舍五入 |
+
+亏损桶沿用 v2.1 的 `p <= 0` 口径（`portfolio_pullback_backtest.py:155-156`），使胜率与盈亏比互相自洽：持平的一笔算亏。**不含 `平均R` 和 `止损宽度`。**
+
+**夏普必须改分组方式。** 现有 `sharpe.py::daily_returns` 按 `index.date` 分组 —— 对中国期货是错的：夜盘 bar 的日历日比它的 `trading_date` 早一天，周五夜盘更是落在下周一，按日历日分组会把一个交易日劈成两半并打乱周末顺序。在 `src/performance/sharpe.py` **新增**（不动现有函数，v2.1 依赖它们）：
+
+```python
+TRADING_DAYS_PER_YEAR_CN = 243     # 实测 RB 2010-01-04..2026-07-29 共 4017 个 trading_date / 16.57 年
+
+def session_returns(equity_curve, trading_date) -> pd.Series
+def sharpe_ratio_cn(equity_curve, trading_date, risk_free_rate=0.0,
+                    periods_per_year=TRADING_DAYS_PER_YEAR_CN) -> float
+```
+年化系数的差异很小（`√(243/252) = 0.982`），分组的差异不是。空仓日也要有权益快照（主循环第 4 步在空仓时写 `capital`，已满足），这样零收益日会被计入、不会虚高夏普。样本 <2 天时返回 `nan`，面板显示 `n/a`（沿用现有守卫）。
+
+---
+
+## 6. 前端（`src/viz/chart_rbreaker.py`）
+
+底层是 lightweight-charts **v4.1.3**（`lightweight_charts/js/lightweight-charts.js`）跑在 pywebview 原生窗口里。所有 `run_script` 体在 `show()` 前被**拼成一个字符串**送进单次 `evaluate_js`（`abstract.py:54-58`）—— 这就是顶层 `const` 会跨脚本冲突、以及一次未捕获异常会杀掉整批脚本的原因。
+
+**命名规则**：每个脚本体裹在裸 `{ … }` 块里（`_stats_page` 的写法，chart.py:2208）；需要跨脚本存活的一律挂到 `window.rb` 上。`build_ticker_search` 已经占用了顶层的 `box`/`input`/`list`/`active` 和 `setActive`/`visibleOpts`/`pick`/`openList`。
+
+### 6.1 六条阶梯线
+
+七个 `Line` series（六线 + 止损线），在 `render` 之外**建一次**：
+```python
+line = chart.create_line(name, color=col, style=dash, width=w, price_line=False, price_label=False)
+line.run_script(f"try {{ {line.id}.series.applyOptions({{lineType: 1, lastValueVisible: false, "
+                f"priceLineVisible: false, crosshairMarkerVisible: false}}) }} catch (e) {{}}")
+drop_legend_row(chart, line)
+```
+`lineType: 1` = `LineType.WithSteps`，已在 bundle 中确认存在（`t[t.Simple=0]="Simple", t[t.WithSteps=1]="WithSteps", t[t.Curved=2]="Curved"`），step 渲染器走 `lineTo(x_i, y_{i-1})` 再 `lineTo(x_i, y_i)`，**日界处不会出现斜线**（默认的 `lineType: 0` 会）。
+
+配色：Bbreak `#26a69a` / Sbreak `#ef5350`（实线 2px，策略实际使用）；Ssetup / Bsetup `#ffca28` 虚线 1px；Senter / Benter `#7e57c2` 点线 1px；止损线单独一色实线。
+
+**每个 `trading_date` 只发一个点**（该日首根 bar 的时间），末尾补一个窗口末根的点。step 渲染器会保持前值直到下一个 x，所以「D 日首根 → D+1 日首根」恰好是一条平线加一次垂直跳变。夜盘品种的「首根」是前一日历晚 21:00 —— 这是对的，新 `trading_date` 从那时开始，而它的线在当天下午 15:00 就已定好。开销从 6×85000 点降到 6×250 点，每次切品种省掉约 25 MB 的 JS 字符串。
+
+**不要** 给 `Chart(...)` 传 `scale_candles_only=True`：六条线本来就该进自动缩放。
+
+### 6.2 止损线只在持仓期间画
+
+**关键实现细节：用逐点颜色，不能用 NaN。** 已在 bundle 里逐层追过：`util.py:42` 的 `js_data` 会逐条记录剔除 `None`/`NaN` 的键 → NaN 行序列化成 `{"time": …}`（JSON 合法，不会崩）→ 数据层把它归类为 whitespace 行 → `zb()` 用 `Ks()` 谓词把 whitespace 行**整个滤出序列** → 渲染器无条件 `lineTo` 直接跨过去。**NaN 给你的是一座桥，不是一个断口。**
+
+`LineData.color` 逐点着色在这个 bundle 里是支持的（行工厂 `Hs` 读 `n.color`），仓库也已经在用（`chart.py:257`）。在 `walkLine` 里，活动描边样式取的是**前一个点**的，也就是说**一个点的颜色决定的是从它出发的那一段**。所以：
+```python
+rows["color"] = TRAIL_COLOR
+rows.loc[last_bar_of_each_trade, "color"] = "rgba(0,0,0,0)"   # 隐藏「桥」
+```
+把每笔交易最后一个点涂成全透明，通往下一笔的那段桥就隐形了，笔内每一段照常可见。约 150 笔 × 数十根 ≈ 几千个点，可忽略。
+
+值的口径：入场根画初始止损 `Senter + (Bbreak − Ssetup)/d`；之后每根画**该根被测试的**那个位；出场根画触发的那个位。同样用 `lineType: 1`（它本来就是阶梯）。
+
+兜底方案（若上述行为在库升级后失效）：每笔交易一个 `Line` series。可行但会污染 `chart._lines` 和图例。在 `chart_rbreaker.py` 里留注释注明 bundle 版本 v4.1.3 和相关的压缩函数名（whitespace 过滤 `Gs`/`Ks`/`zb`，逐点色 `Hs`，`walkLine` 是 `dt`），好让下一个人五分钟内重新验证。
+
+### 6.3 按钮与可见性
+
+`window.rb = {linesOn, mode, series, statsOn, statsPanel}` 引导脚本先跑，再由 Python 注册七个 series id。可见性解析器是纯 JS（切换零往返），它同时解决了左上 toggle 与右上按钮的叠加语义：
+```js
+vis = {
+  Ssetup: linesOn, Bsetup: linesOn, Senter: linesOn, Benter: linesOn,
+  Bbreak: linesOn || breakout,  Sbreak: linesOn || breakout,  trail: breakout,
+}
+```
+即决策 7：两个都开 = 六线 + 止损线；只开 Breakout = Bbreak/Sbreak/止损线；想只看两条线就把左上 toggle 关掉。
+
+**左上 toggle**：锚在搜索框正下方，`left: 10px`，`top` 优先用运行时实测（`box.getBoundingClientRect().height + 2`，包在 try/catch 里），兜底 `46px`。z-index `4002`，压在候选列表（4001）之上保持可点 —— 你说过被搜索框挡住无所谓。
+
+**右上按钮条**：`top: 8px; right: 12px`，三个按钮 `策略结果统计` / `Breakout` / `Reversal`。Breakout 与 Reversal 互斥且可再点一次全关（`mode = (mode === m) ? null : m`）。选中态套用 `_build_admin_button` 的配色（背景 `#2196F3`、白字、同色边框）。切换后 `window.callbackFunction('RB_MODE_~_' + (mode || 'none'))` 回 Python 去换 markers 和面板文字；**series 可见性留在 JS 里**，不走往返。`Reversal` 做成可点但内容为占位（隐藏突破叠加、面板显示「未实现」），这样互斥逻辑真的被走到。
+
+搜索框已经把库自带的 OHLCV 图例挪到 `left ≈ 198px`，1800px 宽度下右上角是空的，不冲突。
+
+### 6.4 中文统计面板
+
+**两条硬规则：**
+
+1. **绝不把中文字面量插进 JS 的 f-string，一律 `json.dumps()`。** 默认 `ensure_ascii=True` 会输出 `"策略..."`，线上全 ASCII，绕开 pywebview → `mp.Queue` → pickle → `evaluate_js` 这一整条链上所有编码问题，顺带免费转义引号和反斜杠。这是唯一能避免这里变成一场调试马拉松的规则。
+2. **字体栈要显式点名 CJK。** 现有 `UI_FONT` 是纯拉丁栈，"Segoe UI" 没有汉字字形，Chromium 会回退到 SimSun（宋体），13px 下很难看。新增：
+```python
+UI_FONT_CJK = ('-apple-system, BlinkMacSystemFont, "Segoe UI", '
+               '"Microsoft YaHei UI", "Microsoft YaHei", '        # Windows 11 zh-CN 默认无衬线
+               '"PingFang SC", "Hiragino Sans GB", '
+               '"Noto Sans CJK SC", "Source Han Sans SC", '
+               'Roboto, "Helvetica Neue", sans-serif')
+```
+注意刻意的约束：**字体名里不能有撇号**，因为这个字符串会被插进单引号的 JS 字符串字面量。再加 `font-variant-numeric: tabular-nums` 让数字列对齐。
+
+面板 div **建一次**（`top: 46px; right: 12px; z-index: 4003; display: none; pointer-events: none`，背景 `rgba(30,34,45,0.94)`），挂 `window.rb.statsPanel`；内容在 `render()` 和 `on_mode()` 里通过 `push_stats(html)` 更新 —— 与 `chart.py:2514-2579` 的 `render_symbol` / `draw_overlays` 拆分同构。行序严格按上面的表。
+
+### 6.5 Markers
+
+```python
+markers.append({"time": t.entry_time, "position": "below" if long else "above",
+                "shape": "arrow_up" if long else "arrow_down", "color": "#2196F3",
+                "text": f"Entry @ {t.entry_price:.{dp}f}"})
+verb = "Stop" if t.reason == "TRAIL" else "End Session"
+markers.append({"time": t.exit_time, "position": "above" if long else "below",
+                "shape": "arrow_down" if long else "arrow_up",
+                "color": "#26a69a" if pnl > 0 else "#ef5350",
+                "text": f"{verb} {pnl:+.2%}"})
+markers.sort(key=lambda m: m["time"])
+```
+颜色纯由盈亏符号决定、文字纯由离场原因决定 —— 所以收盘平仓的那笔也是绿/红。**必须自己排序**：`marker_list`(abstract.py:249-273) 不排，`setMarkers` 对乱序输入会出错（chart.py:180 就是为此排序的）。`dp` 用 `2 if price >= 100 else 3`（复权价不落在整 tick 上）。
+
+### 6.6 render / draw_overlays 拆分
+
+```python
+def render(symbol):            # 贵，切品种时调
+    if symbol not in cache:
+        prep = prepare(symbol, START, END, cfg)
+        res  = run_rbreaker_backtest(prep, params, cfg)
+        cache[symbol] = (prep, res, compute_stats(symbol, res, cfg.cost_bps))
+    chart.set(ohlcv_frame(prep)); chart.fit()
+    for name, line in series.items():
+        line.set(line_rows(prep, res, name))     # 七条全部重设，否则残留上一个品种的数据
+    draw_overlays()
+
+def draw_overlays():           # 便宜，切模式时调
+    ...  # markers + 面板文字
+```
+两个库特性使这个拆分安全：`Candlestick.set`(abstract.py:565-568) 只会重设那些 `name` 出现在蜡烛帧列名里的 `chart._lines` —— 我们的名字（`Bbreak` 等）不是列名，所以 `chart.set()` 永远不会冲掉叠加层；它也不碰 markers，所以 `clear_markers()` 必须显式调。
+
+建构顺序：`build_ticker_search`（先，占掉 box/input/list）→ 引导脚本 → series 注册 → toggle / 按钮条 / 面板 → `render(default)` → `chart.show(block=True)`。开发期用 `Chart(debug=True)` 打开 webview devtools。
+
+---
+
+## 7. 性能与 runner 默认值
+
+本机实测：
+
+| 操作 | 耗时 |
+|---|---|
+| numpy 标量循环，130 万根 | **0.34 s** |
+| `df.iloc[i]` 循环，同样根数 | **10.4 s** |
+| parquet 读 2 列，RB 全历史 | 0.05 s |
+| `js_data` 8.5 万行 | 0.36 s / **16.3 MB** |
+| `js_data` 100 万行 | 3.73 s / **193 MB** |
+
+真正的瓶颈是往图表推数据，不是回测。runner 默认：
+```python
+START = "2025-07-01"      # ~250 个交易日
+END   = "2026-07-29"
+DEFAULT_SYMBOL = "RB"
+ADJUST = True
+```
+23:00 收夜盘的品种约 8.5 万根，AU/AG/SC（556 根/日）约 13.5 万根 —— 0.4~0.6 s 序列化、16~26 MB。六条阶梯线约 1500 点、止损线约几千点，基本免费。回测结果按品种缓存，重选瞬时。
+
+---
+
+## 8. 测试
+
+`tests/test_rbreaker_lines.py`
+- 六条线对手算值：H=110, L=90, C=100 → Ssetup 113.5、Bsetup 86.5、Senter 106.05、Benter 93.95、Bbreak 120.25、Sbreak 79.75
+- `Ssetup − Bsetup == (1+f1)(H−L)`；`Bbreak − Ssetup == f3(1+f1)(H−L) == 0.3375R` —— **把公式里那个 0.3375 钉死成 f3(1+f1)，而不是一个来历不明的常数**
+- 严格序 `Bbreak > Ssetup > Senter > Benter > Bsetup > Sbreak`（随机 `L < C < H`）
+- 标量与 Series 输入一致
+- **闭式解守卫**：用字面 giveback 表达式和 `Senter + (peak−Ssetup)/d` 两条路径各算一遍，随机输入下断言差 < 1e-12
+
+`tests/test_rbreaker_sessions.py`
+- 夜+日切成 2 个时段；无夜盘品种 3 段日盘 → 1 个时段；中金所午休不切；AU 跨零点单时段末根 02:30；周五夜盘归下周一（58h 间隔正确切开）
+- **复现 AU 2025-10-09**：151 根平价 + 1 根带 +4.06% 的压缩 bar → 整段被丢，真实段存活，该 `trading_date` 的 H/L/C 不受污染
+- 10 根的短碎片**不**被丢（低于 `min_bars`），窗口边缘碎片不会被误吃
+- 4h 的合成日内间隔触发断言
+- 前日参照跳过首日与陈旧洞；参照的 H 必须能来自夜盘 bar
+
+`tests/test_rbreaker_backtest.py`
+- 每根的 `trail_stop[i] == Senter + (peak_through_i−1 − Ssetup)/d`
+- **把 `high[i]` 改成天文数字，bar i 的出场决策与价格必须不变**（钉住极值折入的位置）
+- **截断法无未来函数**：跑完整帧；再把 `i..n−1` 覆写成垃圾重跑，所有 `exit_bar_idx < i` 的交易必须逐字节相同
+- 一根一动作：无 `entry_bar_idx == exit_bar_idx`；`trades[k+1].entry_bar_idx > trades[k].exit_bar_idx`
+- 跳空按 open 成交且 `gapped is True`
+- 时段末根强制平仓，`reason == "SESSION_END"`
+- 同根止损优先于收盘平仓
+- **每时段最多一笔**：一个时段内触发两次突破只成交一笔；下一时段重置
+- 时段首根不入场；信号不跨时段边界
+- 首个交易日无交易
+- 空头是多头的镜像（`p ↦ 200 − p` 反射）
+- `cost_bps` 每个来回只扣一次
+- 持仓永不跨时段边界
+
+`tests/test_rbreaker_stats.py`
+- 持平算亏（`p <= 0`）；盈亏比 = avg_win/|avg_loss|；最大回撤是负分数、面板取 abs
+- **夏普按 `trading_date` 而非日历日分组**：构造夜盘日历日与 `trading_date` 不同的 fixture，断言日收益条数 == `n_trading_dates − 1`，且按日历日分组会给出不同（错误）的条数
+- 年化用 243
+- 抽取出来的 `trade_stats` 三个函数与 v2.1 原版逐值相同（抽取回归守卫）
+
+`tests/test_rbreaker_smoke.py` — 脚本式 `main()`（仿 `test_v3_minute_smoke.py`，不开窗口）：对 manifest 里全部 59 个品种跑一年窗口的完整管线，逐品种打印 `时段数 / 可交易日 / 成交 / 净收益 / 回撤 / 被丢段数 / 耗时`，并断言每个品种都通过间隔断言。这是唯一能抓住 59 个品种里某个时段形状意外的东西。
+
+---
+
+## 9. 验证
+
+```powershell
+python -m pytest tests/ -q                      # 全部通过，含既有的 10 个 v2.1 测试（抽取不得回归）
+python -m tests.test_rbreaker_smoke             # 59 品种管线冒烟，看被丢段数与耗时
+python -m src.run_v3_minute_chart               # 旧浏览器仍正常（重构等价性）
+python -m src.run_v3_rbreaker_chart             # 主交付物
+```
+
+窗口打开后逐项确认：
+1. K 线正常，OHLCV 图例在搜索框右侧，百分比是收盘到收盘。
+2. 左上 toggle 开 → 六条线出现，日界处是**垂直跳变不是斜线**；关 → 全消失。
+3. 右上 `Breakout` → Bbreak/Sbreak/止损线 + 入场出场箭头；止损线**只在持仓段可见**，笔与笔之间没有连线。
+4. 点 `Reversal` → Breakout 自动弹起，突破叠加消失，面板显示占位。再点一次两个都关。
+5. `策略结果统计` → 中文面板出现，**汉字不是宋体、不是方块**，九行齐全、无 `平均R`、无 `止损宽度`、有 `策略夏普比`，数字右列对齐。
+6. 切品种（键盘上下 + Enter）→ 线、箭头、面板全部换成新品种，缩放状态不丢，无残留。
+7. 挑一笔交易人工核对：入场箭头在信号根的**下一根**、成交价等于该根 open；出场箭头的价格等于 `Senter + (peak−Ssetup)/3` 或该根 open（跳空时）。
+8. 控制台无 JS 报错（`Chart(debug=True)` 开 devtools）。
+
+---
+
+## 10. 已知风险与本次不做的事
+
+1. **`d = 3` 的追踪止损非常松。** 初始止损在入场价下方约 `(Bbreak − Senter) − 0.1125R ≈ 0.6R`；要到 `peak = Ssetup + 3(Bbreak − Senter)`（即 MFE ≈ **1.79 倍前日振幅**）才回到保本。且**刻意不设保本地板**（v2.1 的吊灯止损有 `floor_stop`，这个没有）。第一版结果出来后这大概是首个要调的参数。
+2. **`peak` 的口径**（见 §1 末）：实现为「入场以来」而非「当日累计」。若本意是后者，是一行改动。
+3. **脏数据过滤是启发式。** `bars >= 20 and traded <= 2` 理论上可能吃掉早期某个冷门品种真正稀薄的时段。实测命中极少（RB 3 段、AU 18 段、IF 1 段，全历史），但 `dropped_runs` 会挂在结果上并在冒烟测试里打印，绝不静默。剩余的 83 根「假日压缩 bar」（`qc_holiday_compression_bars.csv`）中不在零成交段里的那些不会被这一层清掉 —— 记录在案，不在本次范围。
+4. **复权与 k0 耦合**（见 §3 末）：策略帧与显示帧必须共用一个 `k0`，否则线和蜡烛对不上。padding 窗口会诱发这个 bug。
+5. **whitespace / 逐点色是渲染行为，不是 API 契约。** 库升级后没有任何 Python 测试能抓到回归 —— 靠 §6.2 那条注释里的版本号和函数名。
+6. **`Reversal` 是占位。** 六条线里的 Senter/Benter/Ssetup/Bsetup 本次只显示不参与决策。
+   → 2026-08-06 更新：反转半边已单独立项，见姊妹篇 `NOTE-R-breaker反转_实施方案.md`。
+   两者是**互相独立的两个策略**，共用数据层与基线执行纪律；`Reversal` 按钮届时
+   从占位变成真策略。
+7. **成本为 0。** 面板上的「累计净收益」是毛收益。按每时段一笔、一年约 150~200 笔估算，2bp 的往返成本就是 3~4% 的累计拖累 —— 对一个年收益在 ±3% 量级的策略，这一项能直接决定正负号。`cost_bps` 旋钮已留好，接到真实合约参数（tick_size × 乘数 × 费率，仓库目前完全没有）后再填。
+8. **一年是一个 regime，且系数无权威出处。** 仓库自己的研究笔记 `docs/v3.0/策略整理/RSCH-R-breaker&Turtle.md` §十 明确写着 R-Breaker **没有作者本人发表的规范文档**，流传的公式版本彼此有出入 —— 任何回测结果引用时都应声明用的是哪一版重构。建议在面板标题行或 tooltip 里带上 `f1/f2/f3/d` 的实际取值。
+
+---
+
+# 实施记录（2026-08-06 完成）
+
+## 落地的文件
+
+```
+src/strategy/rbreaker.py            六线 + 追踪止损几何 + 参数/开关 dataclass
+src/data/v3_sessions.py             加载 / 脏数据过滤 / 时段推导 / 前日 OHLC / prepare()
+src/engine/rbreaker_backtest.py     逐根 numpy 循环, RBTrade / RBreakerResult
+src/performance/trade_stats.py      从 portfolio_pullback_backtest 抽出的四个统计函数
+src/performance/sharpe.py           +TRADING_DAYS_PER_YEAR_CN / session_returns / sharpe_ratio_cn
+src/performance/rbreaker_stats.py   九行面板 + 终端格式化
+src/viz/lwc_helpers.py              to_ns / drop_legend_row / UI_FONT / UI_FONT_CJK
+src/viz/chart_rbreaker.py           叠加层应用
+src/viz/chart_minute.py             (改) 抽出 build_minute_chart(); UI_FONT 迁到 lwc_helpers
+src/run_v3_rbreaker_chart.py        runner
+tests/conftest.py                   合成 bar / Prepared 构造器
+tests/test_rbreaker_{lines,sessions,backtest,stats}.py   67 个 pytest
+tests/test_rbreaker_smoke.py        59 品种脚本式冒烟
+```
+
+## 与计划的两处偏离
+
+1. **`load_minute_raw` 没有从 `chart_minute.py` 抽出。** 计划 §2 打算抽出来共用，实际发现两个加载器的列集合和复权时机根本不同（策略侧带 padding，k0 必须显式传入；浏览器侧就地取窗口首根）。为三行算术把纯浏览器挂上整个 `strategy` 包不划算，于是各留各的，两边加了互相指向的注释。`load_minute` 的签名和输出逐字节未变，`test_v3_minute_smoke.py` 不受影响。
+
+2. **追踪止损线用 `lineType: 0`（Simple）而不是阶梯。** 计划 §6.2 只说了"逐点颜色 + 把每笔最后一个点涂透明"。实际反编译 `walkLine`（压缩后叫 `dt`）后发现，阶梯模式下一个点的颜色只管**水平段**，`x_h` 处那一小段**垂直跳变用的是下一个点的颜色** —— 于是每笔交易开头都会留下一根从上一笔止损位连过来的竖线。Simple 模式下整段都用前一个点的颜色，涂透明才是干净的。六条日界线仍用阶梯（那里正需要垂直跳变）。
+
+## 实测结果（59 品种，2025-07-01 ~ 2026-07-29，cost_bps=0）
+
+| 项 | 数值 |
+|---|---|
+| 全部通过 | 59/59，合计 8.8s |
+| 单品种耗时 | prepare 0.03~0.10s + 回测循环 0.03~0.09s |
+| 可交易日 | 每个品种均为 258 天（padding 确实为首日供上了参照） |
+| 时段数 | 有夜盘 510（252 天两段 + 6 天单段）；无夜盘/中金所 258 |
+| 被清洗的伪造段 | 合计 44 条，**全部集中在 AG AL AU BC CU NI PB SC SN SS ZN** —— 正是夜盘收在 01:00/02:30 的那批，与 QC 定位的"被错标到 02:30 的集合竞价 bar"完全吻合 |
+| 成交笔数 | 79 ~ 191（每时段至多一笔） |
+| 平均持有 | 88 ~ 186 根 |
+| 离场构成 | 止损:收盘 大约 1:2 ~ 1:6 |
+
+**最值得注意的一条**：离场以**收盘平仓为主**（如 AG 25 止损 / 137 收盘），平均持有 100 根以上。这是 `d=3` 的直接后果 —— 计划 §10.1 已经预告过这个止损很松。参考截图里是 73 止损 / 8 收盘、平均持有 38 根，方向正好相反。**如果要复现那个形态，`d` 是第一个该动的参数**（`d` 越小止损越紧）。
+
+## 验证过的不变量
+
+pytest 77 项全绿（10 项 v2.1 原有 + 67 项新增），另有三轮真实数据校验：
+
+* **无未来函数（截断法）**：把 bar i 之后的数据全部覆写成随机垃圾重跑，所有 `exit_bar_idx < i` 的交易逐字节相同，`trail_stop[:i]` 全等。合成数据和 8 个真实品种上都验过。
+* **闭式解 == 原始公式**：`Senter + (peak − Ssetup)/d` 与逐字照抄的 giveback 表达式在 500 组随机输入下差 < 1e-12，多空两侧都验。
+* **一根一动作 / 每时段一笔 / 持仓不跨时段 / 收尾不留仓**：59 品种全历史窗口逐笔核对。
+* **止损线单调**：多头止损位从不下移，空头从不上移。
+* **图表层**：用桩 `Chart` 无窗口地把整个 app 建一遍，再按库的方式（`abstract.py:54-58`，`initial_script += f'\n{script}'`）把 22 段脚本拼成一个 blob 送进 `node --check` —— 这是唯一能抓住与 `build_ticker_search` 顶层 `const` 冲突的手段。通过。
+* **纯浏览器未回归**：`load_minute` 输出契约、`show_minute_candles` 构建、`UI_FONT` 再导出，均通过。
+
+## 唯一没能自动验证的部分
+
+**窗口里的实际渲染。** 桩测试证明了送进浏览器的数据帧和 JS 都是对的，但六条线的视觉效果、中文字体是否回退成宋体、止损线的"桥"是否真的隐形、面板排版 —— 这些必须开窗口用眼睛看。逐项清单见 §9。
+
+```
+python -m src.run_v3_rbreaker_chart
+```
