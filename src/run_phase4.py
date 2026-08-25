@@ -28,7 +28,7 @@ def make_strategy() -> Strategy:
 
 def main():
     dfs = {
-        s: pd.read_csv(f"data/raw/{s}_5m.csv", parse_dates=["timestamp"]) for s in SYMBOLS
+        s: pd.read_csv(f"data/00-美股ETF历史/raw/{s}_5m.csv", parse_dates=["timestamp"]) for s in SYMBOLS
     }
 
     portfolio_result = run_portfolio_backtest(dfs, make_strategy(), InverseVolatilitySizer())

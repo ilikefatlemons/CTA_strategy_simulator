@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-`src/data/v3_timeframes.py`: 1m -> 5m / 30m / 1d 的分箱与「哪根已收盘」。
+`src/data/v3_timeframes.py`: 1m -> 5m / 15m / 30m / 2h / 1d 的分箱与「哪根已收盘」。
 
 用手搭的 bar 而不是读 parquet —— 失败时指向逻辑而不是数据。帧的形状严格复刻真实
 schema: `datetime` 索引 (tz-naive 北京墙钟, 打标在分钟**末端**)、`trading_date`
@@ -17,7 +17,9 @@ import pandas as pd
 import pytest
 
 from src.data.v3_sessions import derive_segments
-from src.data.v3_timeframes import PB_TFS, build_timeframe, build_timeframes
+from src.data.v3_timeframes import (
+    PB_RULES, PB_TFS, build_timeframe, build_timeframes,
+)
 
 # 真实的商品日盘形状: 09:01-10:15 (75) / 10:31-11:30 (60) / 13:31-15:00 (90) = 225 根
 _DAY_RUNS = (("09:01", 75), ("10:31", 60), ("13:31", 90))
@@ -322,3 +324,86 @@ def test_first_bin_at_or_after_lands_on_a_whole_bar(two_days):
         b = t.first_bin_at_or_after(warmup)
         members = np.flatnonzero(t.bin_of == b)
         assert members[0] == warmup, tf
+
+
+# --------------------------------------------------------------- 15m 与 2h ----
+# 这两个周期是后加的, 数据层只加了两条 PB_RULES。下面几条钉死「加两条就够了」这件事,
+# 以及 2h 的碎箱是**已知且被承认**的形状, 不是可以静默改掉的实现细节。
+
+_四周期 = ("1m", "5m", "15m", "2h")
+
+
+def test_new_timeframes_are_registered_but_not_in_pb_tfs(two_days):
+    """新周期进 PB_RULES, 但 PB_TFS 一个字不动 —— 下游是按名字硬取的。"""
+    assert "15m" in PB_RULES and "2h" in PB_RULES
+    assert PB_TFS == ("1m", "5m", "30m", "1d")
+    # 两个集合都能构建, 互不影响
+    assert set(build_timeframes(two_days, tfs=PB_TFS)) == set(PB_TFS)
+    assert set(build_timeframes(two_days, tfs=_四周期)) == set(_四周期)
+
+
+def test_15m_is_never_truncated_by_the_intraday_breaks(two_days):
+    """日盘三段 75/60/90 都被 15 整除, 夜盘 120 也是 —— 每个 15m 箱恰好 15 根。"""
+    tfb = build_timeframe(two_days, "15m")
+    b = tfb.bin_of
+    sizes = np.bincount(b)
+    assert set(sizes.tolist()) == {15}
+    assert tfb.n_bars == (120 + 225) * 2 // 15
+
+
+def test_2h_bins_are_uneven_and_that_is_the_known_defect(two_days):
+    """
+    2h 的网格锚在午夜, 和交易时段形状无关, 所以箱大小不齐。
+
+    这不是 bug, 是 obsidian/01-周期/周期-2h.md 已经点名并选择「承认它并在结果里
+    分层」的东西。这条测试的作用是**让它不能被静默改掉**: 哪天分箱口径换成段首
+    锚定, 这里会红, 逼人去改那份文档。
+    """
+    tfb = build_timeframe(two_days, "2h")
+    sizes = np.bincount(tfb.bin_of).tolist()
+    # 一档夜盘 21:01-23:00 -> [22:00) 60 根 + [23:00) 60 根;
+    # 日盘 -> 10:00 的 60、11:30 的 75、14:00 的 30、15:00 的 60
+    assert sizes == [60, 60, 60, 75, 30, 60] * 2
+    assert min(sizes) * 2 < max(sizes), "极差没了就说明分箱口径变了"
+
+
+def test_2h_never_spans_an_atomic_segment(two_days):
+    """
+    箱不齐可以忍, 跨段不行 —— 一根 2h 横跨夜->日那 6.5 小时断口是致命的。
+    段号在分箱键里 (`_bin_of` 的 `changed |= new_seg`), 这里做端到端确认。
+    """
+    seg = derive_segments(two_days)
+    for tf in ("15m", "2h"):
+        b = build_timeframe(two_days, tf, segments=seg).bin_of
+        edge = np.r_[True, b[1:] != b[:-1]]
+        first = np.flatnonzero(edge)
+        last = np.r_[first[1:] - 1, len(b) - 1]
+        assert (seg[first] == seg[last]).all(), tf
+
+
+def test_new_timeframes_closed_pos_is_strictly_causal(two_days):
+    """
+    `end_labels[closed_pos] <= start_i < end_labels[closed_pos+1]`, 且非降。
+    这是任何策略读高周期的唯一合法通道, 破了就是未来函数。
+    """
+    starts = two_days.index.to_numpy() - np.timedelta64(1, "m")
+    for tf in _四周期:
+        tfb = build_timeframe(two_days, tf)
+        cp, el = tfb.closed_pos, tfb.end_labels
+        seen = cp >= 0
+        assert (el[cp[seen]] <= starts[seen]).all(), tf
+        nxt = cp + 1
+        ok = nxt < len(el)
+        assert (el[nxt[ok]] > starts[ok]).all(), tf
+        assert (np.diff(cp) >= 0).all(), tf
+
+
+def test_2h_bar_count_per_trading_day_depends_on_the_night_tier(two_days):
+    """
+    每交易日的 2h 根数随夜盘档位变 —— 这就是「同一个 MA55 在不同品种上不是同一段
+    时间」的根源 (周期-2h.md: 无夜盘 4 / 至23:00 是 6 / 至01:00 是 7 / 至02:30 是 8)。
+    夹具是「至 23:00」那一档, 所以应当是 6。
+    """
+    tfb = build_timeframe(two_days, "2h")
+    per_day = tfb.bars.groupby("trading_date").size()
+    assert per_day.tolist() == [6, 6]

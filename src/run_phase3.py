@@ -20,7 +20,7 @@ WEIGHTS_LOG_PATH = "data/phase3_weights.csv"
 
 def main():
     dfs = {
-        s: pd.read_csv(f"data/raw/{s}_5m.csv", parse_dates=["timestamp"]) for s in SYMBOLS
+        s: pd.read_csv(f"data/00-美股ETF历史/raw/{s}_5m.csv", parse_dates=["timestamp"]) for s in SYMBOLS
     }
 
     strategy = Strategy(

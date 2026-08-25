@@ -26,7 +26,7 @@ from src.strategy.pullback import PullbackConfig, PullbackParams
 
 pytestmark = pytest.mark.skipif(
     not os.path.exists(os.path.join(CLEAN_DIR, "AG.parquet")),
-    reason="需要 data/v3.0/clean_1m —— 先跑 python -m src.data.prepare_v3_minute",
+    reason="需要 data/01-pkl层/一次排查/clean_1m —— 先跑 python -m src.data.prepare_v3_minute",
 )
 
 # 为什么是 AG (沪银) 而不是 RB: 时段锁死之后持仓不再跨时段边界, 而**跳空只发生在

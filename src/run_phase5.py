@@ -32,7 +32,7 @@ def make_strategy() -> Strategy:
 
 def main():
     dfs = {
-        s: pd.read_csv(f"data/raw/{s}_5m.csv", parse_dates=["timestamp"]) for s in SYMBOLS
+        s: pd.read_csv(f"data/00-美股ETF历史/raw/{s}_5m.csv", parse_dates=["timestamp"]) for s in SYMBOLS
     }
     cutoff = min(df["timestamp"].max() for df in dfs.values()) - pd.Timedelta(weeks=HISTORY_WEEKS)
     dfs = {s: df[df["timestamp"] >= cutoff].reset_index(drop=True) for s, df in dfs.items()}

@@ -28,7 +28,7 @@ TEST_ROWS = 2000  # ~25 sessions - enough for multiple full windows, fast to loo
 
 
 def main():
-    df = pd.read_csv(f"data/raw/{SYMBOL}_5m.csv", parse_dates=["timestamp"])
+    df = pd.read_csv(f"data/00-美股ETF历史/raw/{SYMBOL}_5m.csv", parse_dates=["timestamp"])
     df_5m = df.iloc[:TEST_ROWS].reset_index(drop=True)
 
     for tf, rule in (("15m", "15min"), ("30m", "30min"), ("1h", "1h")):

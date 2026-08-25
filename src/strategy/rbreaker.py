@@ -12,7 +12,7 @@ R-Breaker 的六条线 + 追踪止损几何。纯数学, 不碰数据也不碰�
 (证明见 tests/test_rbreaker_lines.py::test_strict_line_ordering)。
 
 **出处声明**: R-Breaker 没有作者本人发表的规范文档, 网上流传的公式版本彼此
-有出入 —— 见 docs/v3.0/策略整理/RSCH-R-breaker&Turtle.md 第十节。这里用的是
+有出入 —— 见 docs/03-lineB-R-Breaker/B0-原理与出处/v3.0-RSCH-R-Breaker与Turtle运行逻辑.md 第十节。这里用的是
 最常见的那一版重构, 系数 f1=0.35 / f2=0.07 / f3=0.25。引用任何回测结果时
 都应该带上这组系数。
 
@@ -80,7 +80,7 @@ class RBreakerConfig:
     # 单次往返成本(基点), 直接从每笔 pnl 里扣。0 = 毛收益。
     # 仓库目前没有任何 tick_size / 合约乘数 / 费率表, 所以这里只能是一个旋钮,
     # 接到真实合约参数后再填。参考 docs/v3.0/中国商品期货特殊规则/
-    # NOTE-特殊规则应对方案.md 11.2 的测算路径。
+    # v3.0-PLAN-中国期货特殊规则应对方案.md 11.2 的测算路径。
     cost_bps: float = 0.0
 
 

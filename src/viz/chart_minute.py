@@ -6,7 +6,7 @@ v3.0 一分钟 K 线浏览器。
 可搜索的 ticker 选择器 (phaseF `_build_ticker_search` 的增强版, 补了键盘
 上下键 + Enter 选中)。
 
-复权口径 (见 data/v3.0/data_quality_checklist.md D2/D8):
+复权口径 (见 data/01-pkl层/一次排查/v3.0-SPEC-数据质量排查判据.md D2/D8):
   源数据是**后复权**, 复权价 = close / K, 锚在上市首约, 历史值固定不变。
   直接画 close/K 的话纵轴会严重偏离真实价 (铁矿石是真实价的 8.6 倍), 所以
   展示层再乘一个常数 K0 = 所取窗口**第一根** bar 的 K:
@@ -24,10 +24,10 @@ from typing import Callable
 import pandas as pd
 from lightweight_charts import Chart
 
+from src.data.paths import CLEAN_DIR  # noqa: F401  (原来是重复字面量)
 from src.viz.legend_patch import patch_legend_percent
 from src.viz.lwc_helpers import UI_FONT  # noqa: F401  (原来定义在这里, 调用点不动)
 
-CLEAN_DIR = r"D:\2026_Summer\TradingApp\data\v3.0\clean_1m"
 
 
 # ---------------------------------------------------------------- data ----

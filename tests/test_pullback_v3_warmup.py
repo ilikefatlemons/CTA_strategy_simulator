@@ -26,7 +26,7 @@ from src.data.v3_timeframes import build_timeframes
 
 pytestmark = pytest.mark.skipif(
     not os.path.exists(os.path.join(CLEAN_DIR, "RB.parquet")),
-    reason="需要 data/v3.0/clean_1m —— 先跑 python -m src.data.prepare_v3_minute",
+    reason="需要 data/01-pkl层/一次排查/clean_1m —— 先跑 python -m src.data.prepare_v3_minute",
 )
 
 START, END = "2025-07-01", "2025-10-01"

@@ -7,16 +7,24 @@ venv/
 env/
 .env
 .vscode
-# market data and backtest output - regenerable, and 50+ GB of it, so only the
-# source (*.py, *.ipynb, *.html) and the notes (*.md) under data/ are tracked.
-# Raw bars: src/data/fetch_alpaca.py (v1.0-v2.1), JYDB pull via
-# data/v3.0/check_db/jydb.py (v3.0). Cleaned bars: src/data/prepare_v3_minute.py.
-data/raw/
+# market data - regenerable, and 66 GB of it. Under data/ we track only the
+# source (*.py *.awk *.sh *.ipynb *.html) and the notes (*.md); everything else
+# IS the data. Raw bars: src/data/fetch_alpaca.py (v1.0-v2.1), JYDB pull via
+# data/01-pkl层/一次排查/check_db/jydb.py (v3.0).
+# Cleaned bars: src/data/prepare_v3_minute.py.
+#
+# *.txt matters most: the txt layer alone is 4,006 files / 59 GB. It used to sit
+# outside data/ so nothing caught it; after the 2026-08 reorg it lives at
+# data/02-txt层/原始数据/ and `git add -A` will happily try to stage all of it.
+data/**/*.txt
 data/**/*.pkl
 data/**/*.parquet
 data/**/*.csv
-# per-ticker QC scratch output - rebuilt by the scripts in data/v3.0/tests/
-data/v3.0/test_data/
+# report/ is the opposite: its 明细/*.csv ARE the deliverable (11 MB total), tracked.
 
 .ipynb_checkpoints/
 .DS_Store
+
+# Obsidian: 每次开图/切窗口都会改，diff 全是噪声。
+# graph.json / core-plugins.json 保留在版本里，图谱设置是共享的。
+obsidian/.obsidian/workspace.json

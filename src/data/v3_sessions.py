@@ -20,7 +20,7 @@ v3.0 数据层: 交易时段推导 + 脏数据清洗 + 前一交易日 OHLC。
 trading_date (21:00 开的夜盘属于次日; 周五夜盘属于下周一)。一个 trading_date
 内部再按「时钟间隔 > 3 小时」切成日盘 / 夜盘两段。
 
-docs 的硬规则是「不许写死时段时间或每日 bar 数」(data_quality_checklist.md
+docs 的硬规则是「不许写死时段时间或每日 bar 数」(v3.0-SPEC-数据质量排查判据.md
 :174)。这里两样都没写死: 没有时钟点, 没有 bar 数。写死的只是一个间隔阈值,
 而它落在一条**实测空带**里。24 个品种全历史实测 (覆盖 23:00 / 01:00 / 02:30
 三档夜盘 + 中金所 + 无夜盘):
@@ -61,9 +61,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from src.data.paths import CLEAN_DIR  # noqa: F401  (转出口: 既有调用点仍从这里 import)
 from src.strategy.rbreaker import LINE_NAMES, RBreakerConfig, RBreakerParams, rbreaker_lines
-
-CLEAN_DIR = r"D:\2026_Summer\TradingApp\data\v3.0\clean_1m"
 
 # 时段切分阈值。见模块 docstring 里的实测分布。
 SESSION_SPLIT_GAP = pd.Timedelta("3h")
@@ -104,7 +103,7 @@ def adjust_prices(df: pd.DataFrame, k0: float) -> pd.DataFrame:
 
     源数据本身是后复权的 (锚在上市首约), 直接画 close/K 纵轴会严重偏离真实价,
     所以再乘一个常数 k0。**不要乘 K_last** —— 那是前复权, 补新数据时整段历史
-    都要重算。见 data/v3.0/data_quality_checklist.md D2/D8。
+    都要重算。见 data/01-pkl层/一次排查/v3.0-SPEC-数据质量排查判据.md D2/D8。
 
     volume 不参与复权: K 是价格因子, 手数是手数。
     """
@@ -120,7 +119,7 @@ def contiguous_runs(df: pd.DataFrame) -> np.ndarray:
     """
     `(trading_date, 连续 1 分钟段)` 的段编号。
 
-    与 data/v3.0/tests/qc_fake_session_survivors.py:39-43 逐字同源 —— 那个
+    与 data/01-pkl层/一次排查/排查脚本/qc_fake_session_survivors.py:39-43 逐字同源 —— 那个
     QC 脚本就是用这个粒度找出 ETL 残留的 643 条伪造段的。
     """
     gap = df.index.to_series().diff() > pd.Timedelta("1min")

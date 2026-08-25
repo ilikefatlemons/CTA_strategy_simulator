@@ -10,7 +10,7 @@ from src.rules.entry import MACDGoldenCross
 from src.rules.exit import ATRTakeProfitStopLoss
 from src.rules.reentry import CooldownReentry
 
-DATA_PATH = "data/raw/NVDA_5m.csv"
+DATA_PATH = "data/00-美股ETF历史/raw/NVDA_5m.csv"
 TRADE_LOG_PATH = "data/phase2_trades.csv"
 
 

@@ -1,0 +1,157 @@
+# CLAUDE.md
+
+本文件给 Claude Code（claude.ai/code）提供在本仓库工作时的指引。全文中文。
+
+## 这是什么
+
+一个**逐根 K 线（非向量化）**的回测系统，目前跑在 **59 个中国商品期货品种的 1 分钟数据**上。仓库里同时维护**两条策略线**、**三个可切换的策略**，它们共用一套数据层、一套执行纪律、一个终端窗口。
+
+**文档入口是根目录 `README.md`**，那里有完整的目录结构、八个文档类型码（RSCH/MEMO/ENUM/PLAN/SPEC/DIAG/LEDG/BRIF）和逐文件索引。写新文档时按 `版本-类型-内容.md` 命名。
+
+## 命令
+
+```bash
+# 全部测试
+python -m pytest tests/ -q
+
+# 单个测试
+python -m pytest tests/test_rbreaker_backtest.py::test_no_lookahead_by_truncation -q
+
+# 数据 ETL：主力连续 pkl → 分品种 parquet。跑任何 v3.0 策略前必须先跑一次
+python -m src.data.prepare_v3_minute
+
+# 三策略终端：1 分钟 K 线 + 叠加层 + 中文统计面板
+python -m src.run_v3_rbreaker_chart
+
+# 裸 1 分钟 K 线浏览器，无任何指标
+python -m src.run_v3_minute_chart
+
+# lineA 美股时代的历史脚本（v1.1，读 data/00-美股ETF历史/raw/）
+python -m src.run_phaseF
+```
+
+一律用 `python -m src.<module>` 从**仓库根目录**运行——代码内部全是 `from src....` 导入，直接跑文件会 `ModuleNotFoundError: No module named 'src'`。
+
+没有 `pyproject.toml` / `requirements.txt`。第三方依赖假定已装在当前环境：`pandas`、`numpy`、`lightweight_charts`、`alpaca-py`、`python-dotenv`、`pytest`（parquet 读写还需要 `pyarrow`）。Alpaca 凭据（`ALPACA_API_KEY` / `ALPACA_API_SECRET` / `ALPACA_BASE_URL`）从本地 `.env` 读，已 gitignore。
+
+## 当前架构
+
+### 三个策略，两条线
+
+| 策略 | 线 | 入场 | 出场 |
+|---|---|---|---|
+| Archive-Pullback（多周期回调） | lineA | 1d 定方向 → 30m 回调确认（硬性）→ 1m/5m 触发 | 入场定死固定止损，2R 止盈一半后换吊灯线 |
+| R-Breaker 突破 | lineB | `high[i-1] > Bbreak` 做多 / `low[i-1] < Sbreak` 做空 | **只有**追踪止损 + 时段末强平，无止盈 |
+| R-Breaker 反转 | lineB | 武装（触及 Ssetup/Bsetup）+ 触发（破 Senter/Benter） | 同上 |
+
+突破与反转逐品种净收益相关系数 **+0.145**（近乎正交），这是把它们并排放的唯一硬理由。
+
+### 设计层在 `obsidian/`，代码层还没有 lineA v4.0
+
+`obsidian/` 是一个 Obsidian vault（根就在 `obsidian/`），**lineA 的设计层全在那里**：25 个模块位、49 个中文参数、十节模块契约、一张求值顺序与无未来函数审计表。结构是倒金字塔——`回调策略/回调策略.md` 是策略层唯一的一篇，几乎不含逻辑，主体是一张装配表（每个模块位 → 一个 wikilink）；`03-执行与数据模块/`（12 位）与 `04-信号与风控模块/`（13 位）是跨策略共用的模块池。
+
+**换模块 = 改装配表一行链接，不改别处。** 加新候选按 `00-总纲/模块契约.md` 的「写新模块的流程」四步走：先在 `位-xxx.md` 的「本位候选」里登记（此时是空心节点），再写那篇十节笔记，再把参数加进 `00-总纲/参数总表.md`，最后才动代码。
+
+**同位候选一律写成未解析的 wikilink（空心节点），这是设计而非笔误**——不要去「修」它们。
+
+⚠ **2026-08-25：这套「模块可独立互换」的框架正在被重新审视。** `docs/02-lineA-多周期回调/A2-策略多样性探索-多周期回调/思维导图内容/blocks-guide.md` §四 给出四条**内部自洽完整链**，每条走完 11 个板块，并各自写明自洽理由（标尺一致 / 参照系一致 / 触发速度一致 / 风险量级一致四条轴）。自洽性是**链级**属性而不是模块级的——单独换一个模块位不保证换完还自洽。当前方向是 `A3-单个自洽策略实施+改进`：挑一条链整条实现，而不是做可互换的模块池。
+
+### 数据层是四层，不是一个目录
+
+编号**不是**血缘顺序，是「跨层打头，然后按加工程度：pkl → txt → level-1」：
+
+```
+data/00-跨层/         txt ↔ pkl 逐合约对账（装不进任何单层）
+data/01-pkl层/        主力连续 pkl + 复权因子 K → 一次排查/clean_1m/{SYM}.parquet
+data/02-txt层/        通联日频 txt，3,990 个 future_pricemin*.txt
+data/03-level-1层/    逐笔快照（探查阶段，数据尚未落地）
+data/Archive-美股数据/ lineA v1.0~v2.1 的 Alpaca 5 分钟 ETF 数据
+```
+
+**回测只读 `data/01-pkl层/一次排查/clean_1m/{SYM}.parquet`**（59 个品种 + `_manifest.csv`）。对应的报告在 `report/数据/` 同名层下。
+
+**路径只有一个真源：`src/data/paths.py`**（`CLEAN_DIR` / `RAW_PKL` / `MANIFEST`，由 `__file__` 往上推，不写盘符）。别处一律 import，不许再抄字面量——2026 年那次 data/ 重组把三处复制粘贴的硬编码路径同时打断，而 6 个测试文件 guard 在 `os.path.exists(CLEAN_DIR/...)` 上，于是它们**静默跳过**了 133 个测试而 `pytest -q` 一直是绿的。
+
+### 数据流
+
+```
+data/02-txt层/原始数据/*.txt
+  └─(上游合成) all_symbol_min_full_main_close_k_1.pkl   79 品种主力连续 + 复权因子 K
+      → src/data/prepare_v3_minute.py    清洗 + 筛到 59 品种 → clean_1m/{SYM}.parquet
+        → src/data/v3_sessions.py        加载 → 丢伪造段 → 切时段 → 复权 → 日聚合 → 前日六线
+          → src/data/v3_timeframes.py    1m → 1m/5m/15m/30m/2h/1d 分箱 +「哪根已收盘」
+            → src/strategy/              rbreaker.py 六线几何 · pullback.py MA 级联原语
+              → src/engine/              rbreaker_backtest · rbreaker_reversal_backtest · pullback_v3_backtest
+                → src/performance/ + src/viz/chart_rbreaker.py
+```
+
+`src/rules/`、`src/engine/pullback_backtest.py`、`portfolio_pullback_backtest.py`、`src/run_phase2`~`run_phaseF.py`、`src/viz/chart.py` 是 **lineA 美股 ETF 时代（v1.1）**的实现，仍在跑、仍有测试，不是死代码。
+
+## 必须守住的不变量
+
+### 1. 无未来函数——三个引擎的 docstring 里都有逐行审计表
+
+`rbreaker_backtest.py`、`rbreaker_reversal_backtest.py`、`pullback_v3_backtest.py` 的模块 docstring 各有一张「步骤 / 读取的数据 / 触及的最新 bar」表。**改任何一个引擎，那张表要同步改。**
+
+- 入场信号读 `bar i-1`，**成交在 `bar i` 的 open**。
+- **极值折入必须放在出场测试之后**，并带持仓守卫。这是三个引擎里唯一结构上危险的一步，三处同形（`pullback_backtest.py:296-300` / `rbreaker_backtest.py:230-231`）。
+- `is_session_last[i]` **不是**未来函数——收盘时间是交易所提前公告的，实盘同样提前知道，它是窗口形状属性，循环开始前就已确定。
+- 截断法把这条钉死：`tests/test_rbreaker_backtest.py::test_no_lookahead_by_truncation`——把 bar i 之后的数据全改成垃圾重跑，所有 `exit_bar_idx < i` 的交易必须逐字节相同。
+
+### 2. 复权口径：**复权价 = close / K**，是除不是乘
+
+判据与实测在 `data/01-pkl层/一次排查/v3.0-SPEC-数据质量排查判据.md` 的 D2 节。反着乘会让换月跳空翻倍（未复权换月日界跳空中位数 0.009337，`close/K` 后降到普通日界水平，`close×K` 升到 0.017286）。
+
+### 3. 不许写死时段时间或每日 bar 数
+
+`v3_sessions.py` 只写死一个「时钟间隔 > 3 小时」的阈值，且它落在一条实测空带里：日内最大间隔 2.017h（商品午休），夜→日最小间隔 6.517h（AU/AG/SC 的 02:30 → 09:01），落在 (2.25h, 6h) 的间隔实测 **0 个**，两侧各约 2.7 倍余量。运行时断言 `assert_no_ambiguous_gaps` 盯着它。
+
+### 4. 分箱键必须带段号
+
+`bin 键 = (原子段号, start_i.floor(rule))`。不带段号，一根 30m bar 会横跨夜→日那 6.5 小时断口，甚至横跨周末 58 小时。`tests/test_v3_timeframes.py` 钉死「任何一根合成 bar 都不可能跨段」。
+
+**五种时段模式不参与分箱**——把两个原子段并成一个「时段」是**交易纪律**层面的事（哪些 bar 能开仓），不能让它把 K 线也粘起来。
+
+### 5. bar 标在**分钟末端**
+
+标 09:01 的 1m bar 覆盖 `[09:00, 09:01)`；标 09:30 的 30m bar 覆盖 `[09:00, 09:30)`。**v2.1 的 `resample.py` 恰好相反**（`label="left"`，打在开盘时刻）。这是从 v2.1 移植代码时最容易搞错的一条，图上、markers、十字线吸附、「哪根已收盘」全部共用这一套语义。
+
+### 6. 突破与反转的基线执行纪律逐行同构
+
+出场块 / MFE 折入 / MTM / 时段守卫在两个引擎里必须完全一致，初始止损距离因此逐字节相同，结果才可比。**动了任何一边的基线，另一边要同步。** 刻意没有合并成一个带 mode 参数的引擎（入场状态机真的不同），代价是约 60 行骨架重复，由 `tests/test_rbreaker_smoke.py` 对两个策略跑同一套结构断言来补偿。
+
+### 7. 换时段模式就是换策略，不是换视图
+
+时段末强平是纪律的一部分。RB 一年的强平点数：日夜分开 510（每天两次）、自然日日→夜 259、交易日夜→日 258、日盘 258、夜盘 252。
+
+### 8. 每个会改变结果的行为都要有具名开关
+
+约定见 `src/config.py::BacktestConfig`——为了新旧行为能在同一段数据上做 A/B，而不是被静默烤进代码。加新行为时沿用这个约定。
+
+## 关键陷阱
+
+**v3.0 回调的结果不能和 v2.1 的账本比。** 周期重映射（5m/15m/30m/2h → 1m/5m/30m/1d）把策略的时间常数拉长了约 12 倍：趋势方向从一天变 3 次变成一天变 1 次，冷静期解除从 6 小时变成 3 个交易日。级联的**形状**逐条保真、每个谓词都可证等价，但单位时间的批次数远低于 v2.1。
+
+**`src/rules/*` 一个字都不能改。** 它们仍被 v2.1 引擎和自己的测试使用，并且在 `tests/test_pullback_v3_states.py` 里作为**判等基准**。v3.0 的向量化重写在 `src/strategy/pullback.py`，是并行实现，不是替换。
+
+**R-Breaker 没有作者本人发表的规范文档。** 网上流传的公式版本彼此有出入。这里用的系数是 `f1=0.35 / f2=0.07 / f3=0.25`，**引用任何回测结果都必须带上这组系数**。另外本仓库的反转半边允许**从空仓武装并入场**，超出了研究笔记引用的那一版重构（那版反转只能把突破开出的仓位反手平掉），对外引用同样必须声明这一条。出处讨论见 `docs/03-lineB-R-Breaker/B0-原理与出处/v3.0-RSCH-R-Breaker与Turtle运行逻辑.md` 第十节。
+
+**指标不分时段、连续滚动、没有暖机带。** 所有 MA/ATR 在各自周期的整条 bar 序列上连续滚动，不按 session 或 trading_date 重置：夜盘第一根的 MA20 会用到白盘最后 19 根，ATR 的 `|high - prev_close|` 会跨过隔夜跳空。这是刻意的简化（决策 4），不是疏漏；改法和改动点在 `src/strategy/pullback.py` 的模块 docstring 里写清楚了。
+
+**统计口径（`src/performance/trade_stats.py` 的既有约定）。** 亏损桶是 `p <= 0`（持平算亏，这样胜率和盈亏比自洽）；收益率一律是**净的**（扣掉 `cost_bps`），存普通小数，格式化层再乘 100；最大回撤是**负**分数，且基于**逐根 mark-to-market** 权益曲线（逐笔平仓权益看不见笔内回撤）；Sharpe 用**日频**权益收益 × `sqrt(252)`，不是 bar 级收益（bar 级噪声大且自相关）。
+
+**`run_v3_rbreaker_chart.py` 里 `cost_bps` 默认是 0**，也就是毛收益。
+
+**回调策略需要 60 个交易日暖机**（日线 MA50），由 `PB_WARMUP_DAYS` 控制；暖机段不显示也不交易，凑不满时统计面板副标题会标「暖机不足」。
+
+## 已知缺口
+
+写在 `docs/03-lineB-R-Breaker/B2-策略多样性探索-R-breaker/v4.0-PLAN-R-Breaker策略改进计划.md` 里的五条，动 lineB 之前先读：
+
+1. 日夜分时段是一个**未经隔离检验**的假设；
+2. **涨跌停板完全没有实现，也没有数据**——板上能开仓，止损在封板时仍按正常撮合；
+3. 六线公式仍是昨日单日 H/L/C 的点估计，没用上 1 分钟数据；
+4. 突破入场对**跳空越线**毫无防护，实际风险随跳空幅度 1:1 膨胀且无上限；
+5. 突破与反转还只是两个并排的策略，没有合成。
+
+另外一条贯穿全仓的方法论要求：**任何测试的输出必须是一个分布，并且必须报告样本量 n。** 这不是形式要求——`docs/02-lineA-多周期回调/Archive-美股测试/Archive-审计与修正-v2.0~v2.1/v2.1-LEDG-试验次数与过拟合折扣.md` 记着「已跑过 40+ 组不同配置」「样本外数据实际上为零」，`tests/test_rbreaker_smoke.py:194-195` 至今在打印「最好看的那一格基本注定是噪声——只看结构性差异，不要挑赢家」。规范本身在 v4.0 改进计划的 §0（STD-TEST）。

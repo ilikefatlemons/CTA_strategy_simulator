@@ -40,7 +40,7 @@ START, END = DEV_RANGE if USE_DEV_RANGE else FULL_RANGE
 def main():
     dfs = {}
     for symbol in SYMBOLS:
-        df = pd.read_csv(f"data/raw/{symbol}_5m.csv", parse_dates=["timestamp"])
+        df = pd.read_csv(f"data/00-美股ETF历史/raw/{symbol}_5m.csv", parse_dates=["timestamp"])
         df = df[(df["timestamp"] >= START) & (df["timestamp"] <= END)].reset_index(drop=True)
         dfs[symbol] = df
 

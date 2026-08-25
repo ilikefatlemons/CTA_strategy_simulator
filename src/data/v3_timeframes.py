@@ -64,7 +64,7 @@ v3.0 的 1 分钟 bar 打标在**分钟末端**: 标 09:01 的那根覆盖 [09:0
 实测它恰好且仅仅命中集合竞价那一根 —— 上面五个品种的**全部**孤儿箱都是段首根。
 
 并进去还顺带修对了一件事: 合成 bar 的 `open` 因此取的是**竞价撮合价**, 而这正是
-交易所定义的开盘价 (见 docs/v3.0/中国商品期货特殊规则/NOTE-特殊规则应对方案.md
+交易所定义的开盘价 (见 docs/01-平台层/v3.0-PLAN-中国期货特殊规则应对方案.md
 §1.3: "开盘价 = 集合竞价撮合价, 不是第一笔连续成交")。
 
 关掉它 (`merge_leading_singleton=False`) 会退回逐字面的 resample —— 留着这个开关
@@ -102,11 +102,26 @@ import pandas as pd
 
 from src.data.v3_sessions import derive_segments
 
-# 四个周期。键是对外的名字, 值是 pandas 的 floor 频率;
+# 支持的全部周期。键是对外的名字, 值是 pandas 的 floor 频率;
 #   None -> 每根 1m 自成一箱 (恒等)
-#   "D"  -> 走 trading_date 分支, 不读时钟
+#   "D"  -> 走 trading_date 分支, 不读时钟 (唯一允许跨原子段的周期)
+# 其余一律走 `(原子段号, start_i.floor(rule))` 分箱, `_bin_of` 对 rule 是通用的。
+PB_RULES: dict[str, str | None] = {
+    "1m": None, "5m": "5min", "15m": "15min", "30m": "30min", "2h": "2h", "1d": "D",
+}
+
+# v3.0 回调引擎与 chart_pullback 用的四周期集。**不要动它** —— 下游是按名字硬取的
+# (engine/pullback_v3_backtest.py:243-250 取 1m/5m/30m/1d, viz/chart_pullback.py:72
+# 的 GRID 写死 2x2)。要别的周期集就在调用点自己传 `tfs=(...)`, 不要改这个 tuple。
 PB_TFS: tuple[str, ...] = ("1m", "5m", "30m", "1d")
-PB_RULES: dict[str, str | None] = {"1m": None, "5m": "5min", "30m": "30min", "1d": "D"}
+
+# 15m 与 2h 在 AU 上的实测分箱形状 (2026-05-01 ~ 07-29, 58 个交易日):
+#   15m  跨原子段 0 个; 箱大小 {15: 2046, 16: 56}   —— 干净, 日盘三段 75/60/90 都被 15 整除
+#   2h   跨原子段 0 个; 箱大小 {120:112, 75:58, 61:56, 60:116, 30:114}
+# **2h 有一半的箱是短的**, 一根实际含 30~120 分钟 (4 倍极差), 而 MA 对它们等权平均;
+# 且每交易日的根数随夜盘档位从 4 到 8 不等 (AU 是 7.9)。这是分箱网格锚在午夜、与交易
+# 时段形状无关造成的, 不是市场造成的。引用任何 2h 上的数字都必须声明这一条。
+# 判据与钉死它的测试见 obsidian/01-周期/周期-2h.md 与 tests/test_v3_timeframes.py。
 
 _BAR = pd.Timedelta("1min")
 _BAR_NS = np.timedelta64(1, "m")

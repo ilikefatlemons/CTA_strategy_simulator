@@ -17,7 +17,7 @@ SYMBOL = "NVDA"
 
 
 def main():
-    df = pd.read_csv(f"data/raw/{SYMBOL}_5m.csv", parse_dates=["timestamp"])
+    df = pd.read_csv(f"data/00-美股ETF历史/raw/{SYMBOL}_5m.csv", parse_dates=["timestamp"])
 
     result = run_pullback_backtest(df)
 

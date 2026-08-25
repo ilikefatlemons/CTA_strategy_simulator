@@ -2,7 +2,7 @@
 """
 R-Breaker 突破策略的单品种逐根回测。
 
-规则(全部来自 docs/v3.0/实施方案（Claude Plan）/NOTE-R-breaker突破_实施方案.md):
+规则(全部来自 docs/03-lineB-R-Breaker/B1-拆分成两个策略+时段/v3.0-PLAN-R-Breaker突破实施方案.md):
 
   入场   bar i-1 的价格穿过 Bbreak -> 做多 / 穿过 Sbreak -> 做空,
          **成交在 bar i 的 open**。每个交易时段最多一笔。

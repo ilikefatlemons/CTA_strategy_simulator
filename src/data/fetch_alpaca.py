@@ -38,7 +38,7 @@ SYMBOLS = {
 TIMEFRAME = TimeFrame(5, TimeFrameUnit.Minute)  # type: ignore[arg-type]  # alpaca-py mis-annotates enum members as `str`
 LOOKBACK_DAYS = 730  # ~2 years; free/paper accounts get IEX-feed history this far back
 
-OUT_DIR = "data/raw"
+OUT_DIR = "data/00-美股ETF历史/raw"
 
 
 def get_client() -> StockHistoricalDataClient:

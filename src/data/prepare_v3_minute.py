@@ -6,8 +6,8 @@ v3.0 一分钟数据的一次性 ETL: 6GB 单体 pkl -> 59 个干净的分品种
 单体 pkl, 每次加载 8 秒 + 6GB 内存。拆开之后单品种加载在 0.1 秒量级, 图表
 才能做到切换 ticker 即时响应。
 
-清洗规则全部来自 data/v3.0/data_quality_checklist.md 的排查结论:
-  1. 品种池 = 59 (见 ticker_exclusion_log.md Step 1-4)
+清洗规则全部来自 data/01-pkl层/一次排查/v3.0-SPEC-数据质量排查判据.md 的排查结论:
+  1. 品种池 = 59 (见 v3.0-LEDG-品种筛除日志.md Step 1-4)
   2. usable_from 裁掉 B/SF/SM/CY 的早期无成交段 (Step 5)
   3. 剔除伪造 bar: 任一 (品种,交易日,日历日,日/夜段) 的成交量恒为 0 -> 整段丢弃
      这一条同时命中"节前被取消的夜盘"和"元旦被伪造成完整交易日"两种伪造
@@ -25,8 +25,10 @@ import time
 import numpy as np
 import pandas as pd
 
-SRC = r"D:\2026_Summer\TradingApp\data\v3.0\all_symbol_min_full_main_close_k_1.pkl"
-DST = r"D:\2026_Summer\TradingApp\data\v3.0\clean_1m"
+from src.data.paths import CLEAN_DIR, RAW_PKL
+
+SRC = str(RAW_PKL)
+DST = CLEAN_DIR
 
 POOL = [
     "A", "AG", "AL", "AP", "AU", "B", "BC", "BU", "C", "CF", "CJ", "CS", "CU", "CY",
@@ -35,7 +37,7 @@ POOL = [
     "RU", "SA", "SC", "SF", "SM", "SN", "SP", "SR", "SS", "T", "TA", "TF", "TS", "UR",
     "V", "Y", "ZN",
 ]
-# 早期整日零成交的死区 (data_quality_checklist.md F4)
+# 早期整日零成交的死区 (v3.0-SPEC-数据质量排查判据.md F4)
 USABLE_FROM = {
     "B": "2018-01-01", "SF": "2018-01-01", "SM": "2017-01-01", "CY": "2019-01-01",
 }

@@ -69,5 +69,5 @@ class BacktestConfig:
     # the default - indicators already return neutral until their window fills).
     # A non-zero explicit warm-up buffer (~5-10x the longest lookback: the 50-bar
     # 2h MA / 20-day vol) is a PARAMETER CHOICE left to the owner (§1.4), not set
-    # here. See fix_ledger.md, Item 7.
+    # here. See v2.1-LEDG-修复前后指标台账.md, Item 7.
     warmup_discard_bars: int = 0

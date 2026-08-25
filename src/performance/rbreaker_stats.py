@@ -45,7 +45,7 @@ class RBreakerStats:
     n_exit_session: int
     avg_bars_held: float
     # 六线系数, 带进面板副标题 —— R-Breaker 没有权威公式版本, 任何结果都
-    # 应该声明用的是哪一组系数。见 RSCH-R-breaker&Turtle.md 第十节。
+    # 应该声明用的是哪一组系数。见 v3.0-RSCH-R-Breaker与Turtle运行逻辑.md 第十节。
     f1: float = 0.35
     f2: float = 0.07
     f3: float = 0.25
