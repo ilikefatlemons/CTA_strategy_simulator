@@ -37,6 +37,38 @@ python -m src.run_phaseF
 
 没有 `pyproject.toml` / `requirements.txt`。第三方依赖假定已装在当前环境：`pandas`、`numpy`、`lightweight_charts`、`alpaca-py`、`python-dotenv`、`pytest`（parquet 读写还需要 `pyarrow`）。Alpaca 凭据（`ALPACA_API_KEY` / `ALPACA_API_SECRET` / `ALPACA_BASE_URL`）从本地 `.env` 读，已 gitignore。
 
+## 提交约定
+
+```
+type(线): [阶段] 一句话说清做了什么
+```
+
+`线` 是 `lineA` / `lineB`；`阶段` 是那条线底下的目录码——lineA 是 `A1` / `A2` / `A3`，
+lineB 是 `B0` / `B1` / `B2`，与 `docs/02-lineA-多周期回调/` 和 `docs/03-lineB-R-Breaker/`
+下的文件夹一一对应。不属于任何一条线的改动（数据层、平台层、跨仓文档）scope 写子系统，
+方括号省掉：`refactor(data): 重组 clean_1m 的路径真源`。
+
+**message 要短。** 主题行一句话；正文只留读者非知道不可的东西——为什么这么选、哪里
+反直觉、结论是什么。**顺手修的注释、路径、命名不要写进去**，diff 自己会说。
+
+细节有地方放：逐条实测数字、逐行改动清单、载荷表格一律进仓库文档（lineA-03 走
+`docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/20260826-.../TODO完成.md`），
+commit 里给一行指路即可。目标十几行以内，写完扫一遍，删掉不影响理解的行。
+
+```
+feature(lineA): [A3] 前端扩到六个周期，分两页
+
+分两页而不是一屏 3x2：三行会把格高压掉三分之一，两个副图只剩 ~61px。
+
+  applyPanes  按页布局；本页没有的格子三层一起藏，并新写 left
+  applyRange  新增，换页时补发可见区间
+
+引擎零行为改动（逐笔 CSV 逐字节相同）。511 passed / 6 skipped。
+细节见 docs/.../20260826-.../TODO完成.md。
+```
+
+**不要署名 AI**——不加 `Co-Authored-By`，不提 Claude。
+
 ## 当前架构
 
 ### 三个策略，两条线
