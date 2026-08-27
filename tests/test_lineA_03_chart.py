@@ -114,7 +114,7 @@ def test_冷静期涂的箱与区间独立重算的结果一致(数据):
     df = C.冷静期帧(结果, tfb, 起, tf['15m'])
     assert df is not None and (df["冷静期"] == 1.0).all()
     # 冷静期区间是 **15m** 下标的闭区间, 先换回 1m 再问 2h 的箱号
-    首, 末 = C.十五到1m(tf["15m"])
+    首, 末 = C.驱动到1m(tf["15m"])
     应涂 = set()
     for a, b in 结果.冷静期区间:
         段 = tfb.bin_of[int(首[a]):int(末[b]) + 1]
@@ -193,11 +193,35 @@ def test_标记不伸进暖机段(数据):
 
 # ========================================================= 版面 =============
 def test_版面分数铺满屏幕():
-    assert C.TOP + 2 * C.ROW_H == pytest.approx(1.0)
+    assert C.TOP + C.ROWS * C.ROW_H == pytest.approx(1.0)
+    assert C.COLS * C.COL_W == pytest.approx(1.0)
     assert C.ATR_H + C.MACD_H < C.ROW_H, "两个副图占满了整行, 主图没地方了"
     assert 0 < C.TOP < 0.15
     assert set(C.GRID) == set(C.周期集)
-    assert {v for v in C.GRID.values()} == {(0, 0), (0, 1), (1, 0), (1, 1)}
+
+
+def test_每一页都恰好铺满一个网格():
+    """
+    六个周期分两页, **每页必须恰好填满 ROWS x COLS 且不重叠** —— 少一格屏幕上留洞,
+    重一格两张图叠在一起 (换页只挪位置不重建, 叠上了就是永久的)。
+    """
+    满 = {(r, c) for r in range(C.ROWS) for c in range(C.COLS)}
+    每页: dict = {}
+    for tf, 页表 in C.GRID.items():
+        assert 页表, f"{tf} 一页都不在, 那它为什么还在周期集里"
+        for 页, rc in 页表.items():
+            每页.setdefault(页, []).append((tf, rc))
+    assert set(每页) == set(C.页名), f"页号与页名对不上: {set(每页)} vs {set(C.页名)}"
+    for 页, 项 in 每页.items():
+        坐标 = [rc for _, rc in 项]
+        assert len(坐标) == len(满), f"页{页} 有 {len(坐标)} 格, 期望 {len(满)}"
+        assert set(坐标) == 满, f"页{页} 的坐标不铺满: {sorted(坐标)}"
+        assert len(set(坐标)) == len(坐标), f"页{页} 有两格叠在同一个坑位: {sorted(项)}"
+
+
+def test_每个周期至少出现在一页上():
+    for tf in C.周期集:
+        assert C.GRID.get(tf), f"{tf} 建了瓦片却没有任何一页显示它"
 
 
 def test_面板html带着三条声明(数据):
@@ -264,12 +288,48 @@ def test_建骨架排在任何东西碰window_la3之前(blob):
     assert 建 >= 0 and 建 == 首, f"有脚本早于 建骨架 就碰了 window.la3: {blob[首:首+160]!r}"
 
 
-def test_九个pill都建了(blob):
+def test_十一个pill都建了(blob):
     """中文标签是 json.dumps 写进脚本的 (ensure_ascii -> \\uXXXX), 要用同样的编码去找。"""
     for 标 in ("统计", "回调", "大周期反转", "冷静期", "入场双重条件", "止损/吊灯线"):
         assert json.dumps(标) in blob, 标
     for 标 in ("'MA'", "'ATR'", "'MACD'"):
         assert 标 in blob, 标
+    for 页, 名 in C.页名.items():
+        assert json.dumps(f"{页} {名}") in blob, f"页面 pill 少了 {页} {名}"
+
+
+def test_换页的接线都在(blob):
+    """
+    换页只挪位置、不重建图表对象 (重建会丢缩放状态)。四件事缺一不可:
+
+      1. `page` 默认在第一页
+      2. 每个瓦片带 `pos` (每页一份 top/left), `applyPanes` 按当前页查它
+      3. 本页没有的格子**三层一起藏**, 否则它还占着上一页的坑位
+      4. `applyRange` 存在 —— 建图时非首页的格子盒子宽度为 0, `_限可见区间` 那一轮
+         对它们是空转, 不补发就会看到全区间
+    """
+    assert "page: 1," in blob, "window.la3 里没有 page 默认值"
+    assert "pos:" in blob, "瓦片没有导出每页坐标"
+    assert "const P = String(window.la3.page)" in blob, "applyPanes 没有按页取坐标"
+    assert "const xy = t.pos[P]" in blob
+    assert "if (!xy)" in blob, "没有「本页没有这一格」的分支"
+    assert "window.la3.applyRange" in blob, "少了换页后补发可见区间"
+    assert "window.la3.range" in blob, "可见区间没有存下来给换页用"
+    # 藏的时候主图必须一起藏, 只藏两个副图会让主图留在上一页的坑位上
+    藏 = blob.split("if (!xy)")[1][:400]
+    for 名 in ("t.main.wrapper.style.display = 'none'",
+               "t.atrPane.wrapper.style.display = 'none'",
+               "t.macdPane.wrapper.style.display = 'none'"):
+        assert 名 in 藏, f"隐藏分支里少了 {名}"
+
+
+def test_换页会重排横向位置(blob):
+    """
+    `left` 必须在 JS 侧被改写。原来版面是死的, `left` 只由 Python 的 `pin()` 写一次;
+    15m/30m 两页的**列不同**, 不在 JS 里改 left 就会错位。
+    """
+    assert "wrapper.style.left = x + '%'" in blob, "applyPanes 没有改写 left"
+    assert blob.count("wrapper.style.left = x + '%'") >= 3, "三层都要改 left"
 
 
 def test_三层版面的重排逻辑在(blob):
@@ -296,8 +356,10 @@ def test_三层的时间轴是同步的(blob):
     主图之间十字线消失 (`lwc_helpers.py:344-350`)。
     """
     n = blob.count("subscribeVisibleLogicalRangeChange")
-    # 每格两对 (主↔ATR, 主↔MACD), 每对双向 = 4 次订阅; 四格 = 16
-    assert n == 4 * 2 * 2, f"时间轴同步的订阅数是 {n}, 期望 16"
+    # 每格两对 (主↔ATR, 主↔MACD), 每对双向 = 4 次订阅。
+    # **六格不是八格** —— 15m/30m 两页共用同一个瓦片, 换页只挪位置。
+    期望 = len(C.周期集) * 2 * 2
+    assert n == 期望, f"时间轴同步的订阅数是 {n}, 期望 {期望}"
     assert "rangeSyncing" in blob, "少了重入守卫, 两张图会互相触发到爆栈"
 
 
@@ -383,8 +445,15 @@ def test_根图被隐藏(blob):
 
 
 # ==================================================== 十字线对齐 ============
-def _首根1m(tfb, b: int) -> int:
-    return int(np.flatnonzero(tfb.bin_of == b)[0])
+def _每根的首个1m(tfb) -> np.ndarray:
+    """每根合成 bar 的首个 1m 成分下标, 一次算完整条。
+
+    原来是 `_首根1m(tfb, b) = flatnonzero(bin_of == b)[0]`, **每调一次扫一遍整条
+    bin_of**(15 万根)。周期集从四个涨到六个之后, 1m 当源那几组会变成 1.5e5 x 1.5e5
+    次比较, 单组就要几分钟。`bin_of` 是稠密非降的 (`v3_timeframes._assert_shape`
+    保证), 所以取相邻不等的位置即可, 结果与逐根扫描逐位相同。
+    """
+    return np.flatnonzero(np.r_[True, tfb.bin_of[1:] != tfb.bin_of[:-1]])
 
 
 @pytest.mark.parametrize("源", C.周期集)
@@ -408,13 +477,13 @@ def test_十字线按开盘对齐(数据, 源, 靶):
     X, Y = tf[源], tf[靶]
     Xlab, Ylab = X.bars.index.to_numpy(), Y.bars.index.to_numpy()
 
-    错 = 0
-    for b in range(X.n_bars):
-        真 = int(Y.bin_of[_首根1m(X, b)])
-        s = Xlab[b - 1] if b > 0 else Xlab[b] - np.timedelta64(1, "s")
-        got = int(np.searchsorted(Ylab, s, side="right"))
-        if got != 真:
-            错 += 1
+    # 整条向量化, **不抽样** —— 覆盖与逐根循环完全相同, 只是快几个数量级。
+    首 = _每根的首个1m(X)
+    assert len(首) == X.n_bars, "bin_of 不是稠密非降的, 向量化前提破了"
+    真 = Y.bin_of[首].astype(np.int64)
+    s = np.r_[Xlab[0] - np.timedelta64(1, "s"), Xlab[:-1]]
+    got = np.searchsorted(Ylab, s, side="right").astype(np.int64)
+    错 = int((got != 真).sum())
     # 只允许窗口第一根差 —— 那一根没有上一根标签可用, 退回旧行为
     assert 错 <= 1, f"{源} -> {靶}: {X.n_bars} 根里 {错} 根对不上"
 
@@ -479,12 +548,15 @@ def test_这条测试不是空真_确实有偏离网格的bar(数据):
     """
     _, tf, _ = 数据
     偏 = {}
-    for 名, iv in (("5m", 300), ("15m", 900), ("30m", 1800), ("2h", 7200)):
+    for 名, iv in (("1m", 60), ("5m", 300), ("15m", 900),
+                   ("30m", 1800), ("2h", 7200), ("1d", 86400)):
         秒 = np.array([int(pd.Timestamp(t).value // 10 ** 9) for t in tf[名].bars.index])
         偏[名] = int((秒 % iv != 0).sum())
-    assert 偏["5m"] == 0 and 偏["15m"] == 0, f"5m/15m 本该全在网格上: {偏}"
+    assert 偏["1m"] == 0 and 偏["5m"] == 0 and 偏["15m"] == 0, f"1m/5m/15m 本该全在网格上: {偏}"
     assert 偏["30m"] > 0, "30m 上没有被截短的 bar —— 分箱口径变了?"
     assert 偏["2h"] > 0, "2h 上没有被截短的 bar —— 分箱口径变了?"
+    # 1d 标在当日最后一分钟 (收盘时刻), 几乎不可能落在 UTC 天网格上
+    assert 偏["1d"] > 0, "1d 全落在 86400 秒网格上 —— 标签口径变了?"
 
 
 @pytest.mark.parametrize("模块名", ["src.viz.chart_lineA_03", "src.viz.chart_pullback"])

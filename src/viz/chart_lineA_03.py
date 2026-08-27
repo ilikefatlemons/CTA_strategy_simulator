@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-lineA-03 的标注型测试窗口: 四格 (5m/15m/30m/2h) x 三层 (主图 / ATR / MACD)。
+lineA-03 的标注型测试窗口: **两页各四格** x 三层 (主图 / ATR / MACD)。
+
+    页1 决策层   15m  30m        页2 执行层   1m   5m
+                 2h   1d                      15m  30m
+
+六个周期, 但**瓦片只建六个不是八个** —— 15m/30m 两页都出现, 换页只挪位置, 不复制
+series。分两页而不是 3x2 一屏六格: 那样格高掉三分之一, 两个副图各只剩 ~61px。
 
 这个窗口的用途是**对着 K 线核对策略的每一步**, 不是看收益。所以:
 
-  * 左上角三个指标开关: MA / ATR / MACD —— 纯 JS, 零 Python 往返
+  * 左上角一行: 两个页面 pill ｜ 三个指标开关 MA / ATR / MACD —— 纯 JS, 零 Python 往返
   * 右上角六个标注开关: 统计 / 回调 / 大周期反转 / 冷静期 / 入场双重条件 / 止损·吊灯线
   * **默认全关, 图上只有 Entry / 出场两种箭头**
 
@@ -66,16 +72,35 @@ from src.viz.lwc_helpers import (
 )
 
 # ---------------------------------------------------------------- 版面 ----
-# 顶部两行浮层 (品种下拉 + 指标开关) 留位。TOP 与 pill 的字号/内边距耦合。
+# 顶部两行浮层 (品种下拉 + 顶栏开关) 留位。TOP 与 pill 的字号/内边距耦合。
+ROWS, COLS = 2, 2
 TOP = 0.085
-ROW_H = (1.0 - TOP) / 2
-COL_W = 0.5
+ROW_H = (1.0 - TOP) / ROWS
+COL_W = 1.0 / COLS
 ATR_H = ROW_H * 0.20
 MACD_H = ROW_H * 0.20
 
-周期集: tuple[str, ...] = ("5m", "15m", "30m", "2h")
-GRID = {"5m": (0, 0), "15m": (0, 1), "30m": (1, 0), "2h": (1, 1)}
-格标签 = {"5m": "5 分钟", "15m": "15 分钟", "30m": "30 分钟", "2h": "2 小时"}
+# 六个周期, **两页各四格**, 格子大小与三层结构一个字都不动。
+#
+# 为什么不做 3x2 一屏六格: 那样 ROW_H 掉到 0.305, 两个副图各只剩 ~61px (1000px 窗口),
+# 已经贴着可读下限; 主图从 274px 缩到 183px。分两页则格高完全不变。
+#
+# **15m / 30m 两页都出现**, 它们是两页的接缝 —— 决策层要看回调与风险尺, 执行层要看
+# 信号落到哪根。但**瓦片只建六个不是八个**: 15m/30m 各自只有一份 series, 换页只挪位置。
+# 复制成八格意味着多推一份 15m+30m 的全部数据, 十字线条目也从 24 涨到 32。
+周期集: tuple[str, ...] = ("1m", "5m", "15m", "30m", "2h", "1d")
+页名 = {1: "决策层", 2: "执行层"}
+# {tf: {页号: (行, 列)}} —— 没有某页的键就是那一页不显示这一格
+GRID: dict[str, dict[int, tuple[int, int]]] = {
+    "15m": {1: (0, 0), 2: (1, 0)},
+    "30m": {1: (0, 1), 2: (1, 1)},
+    "2h":  {1: (1, 0)},
+    "1d":  {1: (1, 1)},
+    "1m":  {2: (0, 0)},
+    "5m":  {2: (0, 1)},
+}
+格标签 = {"1m": "1 分钟", "5m": "5 分钟", "15m": "15 分钟",
+          "30m": "30 分钟", "2h": "2 小时", "1d": "日线"}
 
 MA周期 = (21, 55)
 MA颜色 = {21: "#64b5f6", 55: "#ffb74d"}
@@ -118,21 +143,35 @@ class 瓦片:
     吊灯线: Any = None
 
     @property
+    def 所在页(self) -> tuple[int, ...]:
+        return tuple(sorted(GRID[self.tf]))
+
+    def 顶(self, 页: int) -> float:
+        return TOP + GRID[self.tf][页][0] * ROW_H
+
+    def 左(self, 页: int) -> float:
+        return GRID[self.tf][页][1] * COL_W
+
+    # 建图时的初始落位 = 它最早出现的那一页。启动时 `applyPanes()` 会按当前页重排,
+    # 所以这里落在哪一页都不影响最终版面 —— 但必须落在**某一页的合法坐标**上,
+    # 否则第一帧会看到格子叠在一起。
+    @property
     def top(self) -> float:
-        return TOP + GRID[self.tf][0] * ROW_H
+        return self.顶(self.所在页[0])
 
     @property
     def left(self) -> float:
-        return GRID[self.tf][1] * COL_W
+        return self.左(self.所在页[0])
 
 
 # ------------------------------------------------------------- 建面板 ----
 def 建瓦片(root: Chart, 风险周期: str) -> dict[str, 瓦片]:
     """
-    四格 x 三层, **必须在 `root.show()` 之前**建好。
+    六格 x 三层, **必须在 `root.show()` 之前**建好。六个格子一次全建出来, 靠
+    `applyPanes()` 按当前页决定谁显示 —— 换页不重建任何图表对象 (重建会丢缩放状态)。
 
-    `风险周期` 那一格的 ATR 图例会标注「策略读这条」—— 另外三格的 ATR 只是陪看,
-    不标出来的话很容易以为四条都参与判定。
+    `风险周期` 那一格的 ATR 图例会标注「策略读这条」—— 其余各格的 ATR 只是陪看,
+    不标出来的话很容易以为每条都参与判定。
     """
     出: dict[str, 瓦片] = {}
     for tf in 周期集:
@@ -332,10 +371,12 @@ def 注册瓦片(root: Chart, 瓦片们: dict[str, 瓦片]) -> None:
     """
     条 = ", ".join(
         "{}: {{main: {}, atrPane: {}, macdPane: {}, mas: [{}], cd: {}, "
-        "stopLines: [{}, {}], stopLegend: {}.stopLegend, top: {}}}".format(
+        "stopLines: [{}, {}], stopLegend: {}.stopLegend, pos: {}}}".format(
             json.dumps(tf), t.main.id, t.atr面.id, t.macd面.id,
             ", ".join(str(l.id) for l in t.ma线.values()), t.冷静带.id,
-            t.固定止损线.id, t.吊灯线.id, t.main.id, t.top,
+            t.固定止损线.id, t.吊灯线.id, t.main.id,
+            # 每页一份 (top, left)。JSON 的键一律是字符串, JS 侧用 String(page) 查。
+            json.dumps({str(页): [t.顶(页), t.左(页)] for 页 in t.所在页}),
         )
         for tf, t in 瓦片们.items()
     )
@@ -388,18 +429,20 @@ def 联动十字线(root: Chart, 瓦片们: dict[str, 瓦片]) -> None:
 
 
 # --------------------------------------------------------------- 数据 ----
-def 十五到1m(基: TFBars) -> tuple[np.ndarray, np.ndarray]:
+def 驱动到1m(基: TFBars) -> tuple[np.ndarray, np.ndarray]:
     """
-    15m 下标 -> 它的**首 / 末** 1m 成分下标。
+    **驱动周期**的下标 -> 它的**首 / 末** 1m 成分下标。
 
-    引擎自 2026-08-26 起完全跑在 15m 上, 所有下标 (交易、观测点、逐根数组) 都是
-    15m 的。而各格 K 线与 1m 的映射是 `TFBars.bin_of` (1m -> 本格箱), 所以要落到
-    别的格上得先换回 1m。
+    引擎的所有下标 (交易、观测点、逐根数组) 都在驱动周期的下标空间里, 而各格 K 线
+    与 1m 的映射是 `TFBars.bin_of` (1m -> 本格箱), 所以要落到别的格上得先换回 1m。
 
-    **首用于入场与状态类事件, 末用于出场。** 入场成交在这根 15m 的 open, 落点就是
-    它的第一分钟; 而出场只知道「发生在这根 15m 之内」, 具体哪一分钟不可知 ——
-    标在末端才不会声称知道得比实际多。30m / 2h 上两者几乎总落进同一个箱 (15m 箱
-    嵌套在它们里面), 差别只在 5m 那一格, 而 5m 本来就只是装饰。
+    `基` 就是驱动周期的 `TFBars`, **由调用方传进来, 不写死 `tf["15m"]`**。驱动时钟
+    换成 1m 时 (二稿 L15 的 TODO 2), 这个函数退化成恒等映射, 调用点一个字不用改。
+
+    **首用于入场与状态类事件, 末用于出场。** 入场成交在这根驱动 bar 的 open, 落点
+    就是它的第一分钟; 而出场只知道「发生在这根之内」, 具体哪一分钟不可知 —— 标在
+    末端才不会声称知道得比实际多。比驱动周期粗的格子上两者几乎总落进同一个箱,
+    差别只出现在比它细的格子上。
     """
     首 = np.flatnonzero(np.r_[True, 基.bin_of[1:] != 基.bin_of[:-1]])
     末 = np.r_[首[1:] - 1, len(基.bin_of) - 1]
@@ -407,8 +450,8 @@ def 十五到1m(基: TFBars) -> tuple[np.ndarray, np.ndarray]:
 
 
 def 起箱of(tfb: TFBars, 结果: 回测结果, 基: TFBars) -> int:
-    """暖机段切点: `结果.暖机根数` 是 **15m** 根数, 先换回 1m 再问本格。"""
-    首, _ = 十五到1m(基)
+    """暖机段切点: `结果.暖机根数` 是**驱动周期**的根数, 先换回 1m 再问本格。"""
+    首, _ = 驱动到1m(基)
     if 结果.暖机根数 >= len(首):
         return tfb.n_bars
     return tfb.first_bin_at_or_after(int(首[结果.暖机根数]))
@@ -464,7 +507,7 @@ def 冷静期帧(结果: 回测结果, tfb: TFBars, 起箱: int,
     """
     if not 结果.冷静期区间:
         return None
-    首, 末 = 十五到1m(基)
+    首, 末 = 驱动到1m(基)
     n = len(tfb.bin_of)
     冷 = np.zeros(n, dtype=bool)
     for a, b in 结果.冷静期区间:
@@ -566,12 +609,12 @@ def 标记(结果: 回测结果, tfb: TFBars, 起箱: int, 基: TFBars,
     **15m 下标** -> 1m 下标 -> 所属合成 K 线的末端标签。所以同一个标记会在四张图上
     各自落到对应的那根 —— 这正是四周期对读要的效果。
 
-    入场与三类状态点走 `首`(那根 15m 的第一分钟), 出场走 `末` —— 理由见 `十五到1m`。
+    入场与三类状态点走 `首`(那根驱动 bar 的第一分钟), 出场走 `末` —— 理由见 `驱动到1m`。
 
     出场箭头按**结果**着色, 不是只按理由 —— 见模块 docstring「出场配色」。
     """
     snap = tfb.bars.index.to_numpy()[tfb.bin_of]
-    首, 末 = 十五到1m(基)
+    首, 末 = 驱动到1m(基)
     下限 = tfb.bars.index[起箱] if tfb.n_bars > 起箱 else None
     out: list[dict] = []
 
@@ -717,6 +760,8 @@ def 建骨架(chart: Chart) -> None:
             stats: true,                              // 右上角统计面板
             回调: false, 反转: false, 冷静: false, 锁: false,   // 标注, **默认全关**
             止损线: false,                            // 固定止损 + 吊灯 两条线
+            page: 1,                                  // 1 决策层 / 2 执行层
+            range: null,                              // `_限可见区间` 算出来的可见窗口
             tiles: {{}}, layout: {{}}, panel: null, boxes: [], searchBoxW: 0,
         }}
 
@@ -728,22 +773,39 @@ def 建骨架(chart: Chart) -> None:
                 const L = window.la3.layout
                 const mainH = L.rowH - (window.la3.atr ? L.atrH : 0)
                                      - (window.la3.macd ? L.macdH : 0)
+                const P = String(window.la3.page)
                 for (const k in window.la3.tiles) {{
                     const t = window.la3.tiles[k]
-                    let y = t.top
+                    const xy = t.pos[P]
+                    // 本页没有这一格 -> 整格三层一起藏起来。**必须连主图一起藏**,
+                    // 否则它还占着上一页的坑位, 和本页的格子叠在一起。
+                    if (!xy) {{
+                        t.main.wrapper.style.display = 'none'
+                        t.atrPane.wrapper.style.display = 'none'
+                        t.macdPane.wrapper.style.display = 'none'
+                        continue
+                    }}
+                    const x = xy[1] * 100
+                    let y = xy[0]
+                    t.main.wrapper.style.display = ''
+                    t.main.wrapper.style.left = x + '%'
                     t.main.scale.height = mainH
                     t.main.wrapper.style.top = (y * 100) + '%'
                     y += mainH
+                    t.atrPane.wrapper.style.left = x + '%'
                     t.atrPane.wrapper.style.display = window.la3.atr ? '' : 'none'
                     if (window.la3.atr) {{
                         t.atrPane.wrapper.style.top = (y * 100) + '%'
                         y += L.atrH
                     }}
+                    t.macdPane.wrapper.style.left = x + '%'
                     t.macdPane.wrapper.style.display = window.la3.macd ? '' : 'none'
                     if (window.la3.macd) {{
                         t.macdPane.wrapper.style.top = (y * 100) + '%'
                         y += L.macdH
                     }}
+                    // reSize 必须排在 display 置空之后 —— 隐藏元素量出来的盒子是 0,
+                    // 先 reSize 再显示会把图画成零宽。
                     t.main.reSize()
                     if (window.la3.atr) t.atrPane.reSize()
                     if (window.la3.macd) t.macdPane.reSize()
@@ -757,20 +819,50 @@ def 建骨架(chart: Chart) -> None:
             }} catch (e) {{ console.log('la3.applyPanes', e) }}
         }}
 
+        // 换页时把可见窗口补回去。**这一步不能省**: `_限可见区间` 是在建图那一批
+        // 脚本里对**所有**面板发的 setVisibleRange, 而当时非首页的格子是隐藏的、
+        // 盒子宽度为 0, 那次调用对它们是空转。不补的话切到第二页会看到全区间。
+        window.la3.applyRange = () => {{
+            try {{
+                const r = window.la3.range
+                if (!r) return
+                const P = String(window.la3.page)
+                for (const k in window.la3.tiles) {{
+                    const t = window.la3.tiles[k]
+                    if (!t.pos[P]) continue
+                    for (const p of [t.main, t.atrPane, t.macdPane]) {{
+                        try {{
+                            p.chart.timeScale().setVisibleRange({{from: r.from, to: r.to}})
+                        }} catch (e) {{}}
+                    }}
+                }}
+            }} catch (e) {{ console.log('la3.applyRange', e) }}
+        }}
+
         {chart.id}.wrapper.style.display = 'none'
     }}""")
 
 
-def 建指标开关(chart: Chart) -> None:
+def 建顶栏开关(chart: Chart) -> None:
     """
-    左上角三个 pill: MA / ATR / MACD。**纯 JS, 零 Python 往返** —— 状态存
-    `window.la3.*`, `paint()` 重绘三个样式属性, 再调 `applyPanes()` 直接改
-    `applyOptions({visible})` / `scale.height` + `reSize()`。
+    左上角一整行 pill: `[决策层][执行层] ｜ [MA][ATR][MACD]`。
+
+    **页面开关和指标开关刻意共用一行、一个容器。** 另起一行要动 `TOP`, 而 `TOP` 和
+    pill 字号/内边距、以及下面四格的起始高度全都耦合着; 另开一个容器则要自己算横向
+    偏移 (得先量出这一行的宽度)。共用一行两样都不用碰。
+
+    **纯 JS, 零 Python 往返** —— 状态存 `window.la3.*`, `paint()` 重绘样式,
+    再调 `applyPanes()`。换页额外调一次 `applyRange()` 把可见窗口补给新露出来的格子。
 
     照抄 `chart_rbreaker._build_lines_toggle` (:483-567)。`box` 是
     `build_ticker_search` 在同一批脚本里声明的顶层 const —— 位置**实测取它的高度**
     而不是写死, `chart_rbreaker.py:490-496` 记着这个坐标踩过一次高度相关的遮挡 bug。
+
+    **这个函数必须排在 `注册瓦片` 之后**: 它结尾要调一次 `applyPanes()` 把非当前页
+    的格子藏起来 —— Python 侧 `pin()` 只按「最早出现的那一页」落位, 不调这一下,
+    第一帧会看到 1m/5m 叠在 2h/1d 上面。
     """
+    页1标签, 页2标签 = json.dumps(f"1 {页名[1]}"), json.dumps(f"2 {页名[2]}")
     chart.run_script(f"""{{
         const w = document.createElement('div')
         w.style.cssText = 'position:absolute;left:10px;z-index:4002;display:flex;'
@@ -788,6 +880,10 @@ def 建指标开关(chart: Chart) -> None:
             w.appendChild(e)
             return e
         }}
+        const b页1 = mk({页1标签}), b页2 = mk({页2标签})
+        const 隔 = document.createElement('div')
+        隔.style.cssText = 'width:1px;height:16px;background:{BORDER};margin:0 4px'
+        w.appendChild(隔)
         const bMa = mk('MA'), bAtr = mk('ATR'), bMacd = mk('MACD')
 
         const one = (el, on) => {{
@@ -796,6 +892,8 @@ def 建指标开关(chart: Chart) -> None:
             el.style.border = '1px solid ' + (on ? '{选中底}' : '{BORDER}')
         }}
         const paint = () => {{
+            // 页面是**单选**, 指标是各自独立的开关
+            one(b页1, window.la3.page === 1); one(b页2, window.la3.page === 2)
             one(bMa, window.la3.ma); one(bAtr, window.la3.atr); one(bMacd, window.la3.macd)
         }}
         const 切 = (键, el) => el.addEventListener('click', () => {{
@@ -805,8 +903,19 @@ def 建指标开关(chart: Chart) -> None:
         }})
         切('ma', bMa); 切('atr', bAtr); 切('macd', bMacd)
 
+        const 翻页 = (页, el) => el.addEventListener('click', () => {{
+            if (window.la3.page === 页) return
+            window.la3.page = 页
+            paint()
+            window.la3.applyPanes()
+            window.la3.applyRange()
+        }})
+        翻页(1, b页1); 翻页(2, b页2)
+
         paint()
         window.containerDiv.appendChild(w)
+        // 建图时 pin() 只按「最早出现的那一页」落位, 这一下把非当前页的格子藏掉
+        window.la3.applyPanes()
     }}""")
 
 
@@ -934,7 +1043,7 @@ def show_lineA_03(
     handler = f"la3_notes_{chart.id.rsplit('.', 1)[-1]}"
     chart.win.handlers[handler] = 换标注
     建面板(chart)
-    建指标开关(chart)
+    建顶栏开关(chart)
     建标注开关(chart, handler)
 
     画全部(default)
@@ -966,3 +1075,8 @@ def _限可见区间(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 交易
                     {面.id}.chart.timeScale().setVisibleRange({{from: {f}, to: {t2}}})
                 }} catch (e) {{ console.log('la3 range:', e) }}
             }}""")
+    # 存一份给 `applyRange` —— 上面这一轮对**隐藏页**的格子是空转 (盒子宽度为 0),
+    # 换页时要拿这个值给刚露出来的格子补一次。
+    第一 = next(iter(瓦片们.values()))
+    第一.main.run_script(
+        f"{{ try {{ window.la3.range = {{from: {f}, to: {t2}}} }} catch (e) {{}} }}")
