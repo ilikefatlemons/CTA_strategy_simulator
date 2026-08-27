@@ -25,11 +25,11 @@
 
 1. **现在有什么、怎么跑** → `docs/00-总览/v4.0-SPEC-三策略系统总览.md`
 2. **当前在解决什么问题**
-   - lineA 现在在做的那条链 → `docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/goal.md`（规格）+ `python -m src.run_lineA_03`（标注型测试窗口）
+   - lineA 现在在做的那条链 → `docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/20260824-骨架+前端phase/goal.md`（规格）+ `python -m src.run_lineA_03`（标注型测试窗口）
    - lineA → `report/策略/v4.0-BRIF-回调策略结构诊断与修正原则.md`（汇报版，最短，214 行）
    - lineB → `docs/03-lineB-R-Breaker/B2-策略多样性探索-R-breaker/v4.0-PLAN-R-Breaker策略改进计划.md` 的 `Context` 一节
 3. **数据能不能信** → `report/数据/` 下四层各自的 DIAG 报告，先看 `report/数据/02-txt层/v3.1-BRIF-原始数据整改清单.md`；三层 schema 的权威表在 `data/00-跨层/v3.2-SPEC-三层数据已知事实.md`
-5. **lineA 的设计层** → `obsidian/00-总纲/模块库入口.md`（Obsidian vault，25 个模块位）。⚠ 这套「模块可独立互换」的框架正在被重新审视，见 §八 缺口 6
+5. **lineA 的研究 vault** → `obsidian/00-总纲/模块库入口.md`（Obsidian vault，25 个模块位）。⚠ **它不参与落地**：规格以 `docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/` 为准，改代码不回写它。见 §八 缺口 6
 4. **想追溯到源头**
    - lineA → `docs/02-lineA-多周期回调/Archive-美股测试/Archive-美股-v1.1/v1.1-SPEC-全链路交易逻辑走查.md`（825 行，代码逐行对照）
    - lineB → `docs/03-lineB-R-Breaker/B0-原理与出处/v3.0-RSCH-R-Breaker与Turtle运行逻辑.md`
@@ -110,7 +110,7 @@ docs/
 └── 04-参考资料/                与线、与版本都无关的领域知识
 ```
 
-**另有 `obsidian/`（不在 docs/ 下）** —— lineA 的**设计层**，一个 Obsidian vault：25 个模块位、49 个中文参数、十节模块契约、求值顺序与无未来函数审计表。⚠ 它的「模块可独立互换」前提正在被重新审视，见 §八 缺口 6。
+**另有 `obsidian/`（不在 docs/ 下）** —— lineA 的**研究 vault**，一个 Obsidian vault：25 个模块位、49 个中文参数、十节模块契约、求值顺序与无未来函数审计表。⚠ **不参与落地**（2026-08-27）：它当词汇表读，落地规格看 `docs/.../A3-单个自洽策略实施+改进/`。它的「模块可独立互换」前提也正在被重新审视，见 §八 缺口 6。
 
 **lineA 的分支轴是「阶段」** —— 同一套信号逻辑被反复审计、移植、重构，是一条时间轴：
 

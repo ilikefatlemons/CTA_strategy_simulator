@@ -2,7 +2,7 @@
 """
 lineA-03 回测引擎 —— 逐根 15m, 非向量化。
 
-策略规格见 `docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/goal.md`, 原语在
+策略规格见 `docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/20260824-骨架+前端phase/goal.md`, 原语在
 `src/strategy/lineA_03.py`。**执行纪律逐字沿用 `src/engine/pullback_v3_backtest.py`**,
 只有策略逻辑与周期集不同。
 
