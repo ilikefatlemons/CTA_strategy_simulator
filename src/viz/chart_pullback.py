@@ -62,6 +62,7 @@ from src.performance.pullback_stats import (
 )
 from src.viz.legend_patch import patch_legend_percent
 from src.viz.lwc_helpers import (
+    set_markers_exact,
     UI_FONT_CJK, create_legend_div, drop_legend_row, invalidate_crosshair_snap, pin,
     price_dp, set_visible, sync_timescale_only, to_ns, wire_single_line_legend,
     wire_synced_crosshair,
@@ -401,10 +402,11 @@ def draw_markers(
     for name in PB_TFS:
         tile, tfb = tiles[name], tf[name]
         start = tfb.first_bin_at_or_after(warmup_bars)
-        tile.main.clear_markers()                             # type: ignore[attr-defined]
-        ms = markers(result, tfb, start, notes)
-        if ms:
-            tile.main.marker_list(ms)                         # type: ignore[attr-defined]
+        # **不用库的 `marker_list`**: 它把时间向下取整到猜出来的 `_interval`
+        # 网格 (`_single_datetime_format`), 于是被时段断口截短的 bar —— 30m 上
+        # 每天的 10:15 (10:15-10:31 小节休息) —— 上面的标记会被挪到更早的一根。
+        # 见 `lwc_helpers.set_markers_exact`。
+        set_markers_exact(tile.main, markers(result, tfb, start, notes))
         tile.cooldown.set(cooldown_frame(result, tfb, start) if notes else None)  # type: ignore[attr-defined]
 
 

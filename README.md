@@ -25,6 +25,7 @@
 
 1. **现在有什么、怎么跑** → `docs/00-总览/v4.0-SPEC-三策略系统总览.md`
 2. **当前在解决什么问题**
+   - lineA 现在在做的那条链 → `docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/goal.md`（规格）+ `python -m src.run_lineA_03`（标注型测试窗口）
    - lineA → `report/策略/v4.0-BRIF-回调策略结构诊断与修正原则.md`（汇报版，最短，214 行）
    - lineB → `docs/03-lineB-R-Breaker/B2-策略多样性探索-R-breaker/v4.0-PLAN-R-Breaker策略改进计划.md` 的 `Context` 一节
 3. **数据能不能信** → `report/数据/` 下四层各自的 DIAG 报告，先看 `report/数据/02-txt层/v3.1-BRIF-原始数据整改清单.md`；三层 schema 的权威表在 `data/00-跨层/v3.2-SPEC-三层数据已知事实.md`
@@ -119,7 +120,7 @@ docs/
 | **Archive-审计与修正** | v2.0~v2.1 | 逻辑一个字没改，全部精力用来**挑自己的错**：A1–C22 错误清单 → 逐条修 → 逐条记录前后指标。`DIAG → PLAN → LEDG` 这条链在这里跑完了一整轮 |
 | **A1-初稿** | 照搬入中国期货 1m · v4.0 | 结论是「失效不是条件太严，是条件之间的结构关系有缺陷」，并枚举了 82 个候选调整方案。⚠ **移植那一步本身仍无文档**，见 §八 |
 | **A2-策略多样性探索** | v4.0 | 把「回调再入场」拆成 `板块 → 逻辑 → 措施` 三层树，11 个板块 + 自洽四轴，产出**四条内部自洽完整链** |
-| **A3-单个自洽策略实施+改进** | v4.0 | 当前在做。从 A2 的四条链里挑一条**整条实现**，再改进。只做 AU 一个品种 |
+| **A3-单个自洽策略实施+改进** | v4.0 | 当前在做。`goal.md` 是规格，代码已落地（`src/*/lineA_03*`，入口 `python -m src.run_lineA_03`）。只做 AU 一个品种 |
 
 **lineB 的分支轴是「变体」** —— 三个并列的东西，不是先后关系：
 
@@ -314,7 +315,7 @@ report/
 | **v3.0** | **中国商品期货 · 1m · 59 品种** | 01-平台层、B0、B1 | `data/prepare_v3_minute.py`、`data/v3_sessions.py`、`data/v3_timeframes.py`、`engine/pullback_v3_backtest.py`、`engine/rbreaker_backtest.py`、`engine/rbreaker_reversal_backtest.py`、`strategy/*`、`run_v3_minute_chart.py`、`run_v3_rbreaker_chart.py`、`viz/chart_minute.py`、`viz/chart_rbreaker.py` | `01-pkl层/` | `report/数据/01-pkl层/` |
 | v3.1 | 同上 | 无（纯数据治理） | — | `02-txt层/`（首轮扫描） | `report/数据/02-txt层/` |
 | v3.2 | 同上 | 无（纯数据治理） | — | `02-txt层/`（二轮）、`00-跨层/`、`03-level-1层/` | `report/数据/00-跨层/` |
-| v4.0 | 同上 | A1-初稿、A2、A3、B2、`obsidian/` | `data/paths.py`（其余**尚无代码**） | — | `策略/` |
+| v4.0 | 同上 | A1-初稿、A2、A3、B2、`obsidian/` | `data/paths.py`、`strategy/lineA_03.py`、`engine/lineA_03_backtest.py`、`performance/lineA_03_stats.py`、`viz/chart_lineA_03.py`、`run_lineA_03.py` | — | `策略/` |
 
 对应的测试：v2.1 → `test_pullback_entry.py`、`test_stop_loss.py`；v3.0 → `test_pullback_v3_*.py`、`test_rbreaker_*.py`、`test_v3_*.py`。
 

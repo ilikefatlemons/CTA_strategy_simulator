@@ -7,7 +7,9 @@ schema: `datetime` 索引 (tz-naive 北京墙钟, 打标在分钟**末端**)、`
 是权威交易日键、夜盘 bar 带着**下一个**交易日的 trading_date。
 
 这里钉死的三条不变量, 任何一条破了整个回调引擎就会读到未来数据或者错周期:
-  1. 合成 bar 永不跨原子段 (夜->日那 6.5 小时的断口)
+  1. 合成 bar 永不跨 **trading_date**; 时钟分箱的周期 (5m/15m/30m) 还额外不跨原子段。
+     **1d 与 2h 是例外, 允许跨原子段** —— 1d 因为一个交易日 = 夜盘段 + 白盘段;
+     2h 因为它按交易分钟等分, 那一桶要横过夜->日的断口才凑得满 120 分钟。
   2. 标签 = 末根成分的标签
   3. closed_pos 严格因果, 断口处不提前收
 """
@@ -327,10 +329,27 @@ def test_first_bin_at_or_after_lands_on_a_whole_bar(two_days):
 
 
 # --------------------------------------------------------------- 15m 与 2h ----
-# 这两个周期是后加的, 数据层只加了两条 PB_RULES。下面几条钉死「加两条就够了」这件事,
-# 以及 2h 的碎箱是**已知且被承认**的形状, 不是可以静默改掉的实现细节。
+# 15m 仍走段内时钟分箱。**2h 在 2026-08-26 改成了「交易日等分 120 个连续交易分钟」**,
+# 下面几条钉死新形状: 桶大小、每交易日桶数、允许跨原子段但绝不跨 trading_date。
 
 _四周期 = ("1m", "5m", "15m", "2h")
+
+# AU/AG/SC 那一档夜盘: 21:00 竞价 + 21:01-02:30 共 330 根连续。
+_夜盘至0230 = (("21:01", 330),)
+
+
+@pytest.fixture
+def au形状() -> pd.DataFrame:
+    """
+    实测的 AU 交易日形状 (556 根): 夜盘有 21:00 竞价根, **白盘没有** —— AU 的白盘
+    数据就是从 09:01 开始的。这个不对称正是 `_竞价根` 必须逐段判、不能逐交易日判
+    的原因。
+    """
+    rows = [(pd.Timestamp("2026-03-02 21:00"), pd.Timestamp("2026-03-03"),
+             999.0, 999.0, 999.0, 999.0, 4456.0)]
+    rows += _bars("2026-03-02", _夜盘至0230, "2026-03-03", 1000.0)
+    rows += _bars("2026-03-03", _DAY_RUNS, "2026-03-03", 2000.0)
+    return _frame(rows)
 
 
 def test_new_timeframes_are_registered_but_not_in_pb_tfs(two_days):
@@ -351,34 +370,82 @@ def test_15m_is_never_truncated_by_the_intraday_breaks(two_days):
     assert tfb.n_bars == (120 + 225) * 2 // 15
 
 
-def test_2h_bins_are_uneven_and_that_is_the_known_defect(two_days):
+def test_2h_是交易日等分而不是时钟网格(two_days):
     """
-    2h 的网格锚在午夜, 和交易时段形状无关, 所以箱大小不齐。
+    旧口径(段内 floor("2h"), 网格锚在午夜)在这个夹具上给出 [60,60,60,75,30,60] ——
+    一半的箱是短的。新口径按**连续交易分钟数**等分: 前几桶恰好 120, 末桶是余数。
 
-    这不是 bug, 是 obsidian/01-周期/周期-2h.md 已经点名并选择「承认它并在结果里
-    分层」的东西。这条测试的作用是**让它不能被静默改掉**: 哪天分箱口径换成段首
-    锚定, 这里会红, 逼人去改那份文档。
+    夹具是「夜盘至 23:00」那一档, 每交易日 345 根:
+        桶0  21:01-23:00              120
+        桶1  09:01-10:15 + 10:31-11:15  75+45 = 120
+        桶2  11:16-11:30 + 13:31-15:00  15+90 = 105   <- 末桶, 余数
     """
     tfb = build_timeframe(two_days, "2h")
-    sizes = np.bincount(tfb.bin_of).tolist()
-    # 一档夜盘 21:01-23:00 -> [22:00) 60 根 + [23:00) 60 根;
-    # 日盘 -> 10:00 的 60、11:30 的 75、14:00 的 30、15:00 的 60
-    assert sizes == [60, 60, 60, 75, 30, 60] * 2
-    assert min(sizes) * 2 < max(sizes), "极差没了就说明分箱口径变了"
+    assert np.bincount(tfb.bin_of).tolist() == [120, 120, 105] * 2
+    assert [f"{x:%m-%d %H:%M}" for x in tfb.bars.index] == [
+        "03-02 23:00", "03-03 11:15", "03-03 15:00",
+        "03-03 23:00", "03-04 11:15", "03-04 15:00"]
 
 
-def test_2h_never_spans_an_atomic_segment(two_days):
+def test_2h_在AU那一档落成五个整桶(au形状):
     """
-    箱不齐可以忍, 跨段不行 —— 一根 2h 横跨夜->日那 6.5 小时断口是致命的。
-    段号在分箱键里 (`_bin_of` 的 `changed |= new_seg`), 这里做端到端确认。
+    实测 AU 的目标形状。前四桶各恰好 120 个**连续交易分钟**, 末桶 75。
+    桶0 是 121 根 = 120 个交易分钟 + 那根不占额度的 21:00 竞价根。
     """
-    seg = derive_segments(two_days)
-    for tf in ("15m", "2h"):
-        b = build_timeframe(two_days, tf, segments=seg).bin_of
-        edge = np.r_[True, b[1:] != b[:-1]]
-        first = np.flatnonzero(edge)
-        last = np.r_[first[1:] - 1, len(b) - 1]
-        assert (seg[first] == seg[last]).all(), tf
+    tfb = build_timeframe(au形状, "2h")
+    assert np.bincount(tfb.bin_of).tolist() == [121, 120, 120, 120, 75]
+    assert [f"{x:%H:%M}" for x in tfb.bars.index] == [
+        "23:00", "01:00", "09:30", "13:45", "15:00"]
+    # 桶0 的 open 必须是竞价撮合价 —— 交易所定义的开盘价
+    assert tfb.bars["open"].iloc[0] == 999.0
+
+
+def test_2h_那一桶刻意横跨夜日断口(au形状):
+    """
+    `01:00-09:30` 这一桶含 01:01-02:30 与 09:01-09:30 两截, 中间隔着 6.5 小时。
+    **这是设计**, 不是漏网 —— 两截加起来正好 120 个交易分钟。15m 仍然一根都不许跨。
+    """
+    seg = derive_segments(au形状)
+    tfb = build_timeframe(au形状, "2h", segments=seg)
+    m = np.flatnonzero(tfb.bin_of == 2)
+    assert len(np.unique(seg[m])) == 2, "这一桶本来就该跨段"
+    assert au形状.index[m[0]] == pd.Timestamp("2026-03-03 01:01")
+    assert au形状.index[m[-1]] == pd.Timestamp("2026-03-03 09:30")
+    assert len(m) == 120
+    # 15m 是对照组: 时钟分箱, 一根都不许跨
+    b15 = build_timeframe(au形状, "15m", segments=seg).bin_of
+    edge = np.r_[True, b15[1:] != b15[:-1]]
+    first = np.flatnonzero(edge)
+    last = np.r_[first[1:] - 1, len(b15) - 1]
+    assert (seg[first] == seg[last]).all()
+
+
+def test_没有任何周期的桶跨trading_date(au形状, two_days):
+    """
+    跨段可以放开, 跨交易日不行 —— 跨了它一根 bar 会横过周末那 58 小时, 而
+    `first_bin_at_or_after` 切暖机段时正是切在交易日边界上。
+    """
+    for df in (au形状, two_days):
+        td = df["trading_date"].to_numpy()
+        for tf in ("1m", "5m", "15m", "30m", "2h", "1d"):
+            b = build_timeframe(df, tf).bin_of
+            edge = np.r_[True, b[1:] != b[:-1]]
+            first = np.flatnonzero(edge)
+            last = np.r_[first[1:] - 1, len(b) - 1]
+            assert (td[first] == td[last]).all(), tf
+
+
+def test_2h_竞价根不占额度(au形状):
+    """
+    竞价根是撮合结果不是一分钟连续交易。让它占一个额度, 所有桶边界会整体前移一根
+    (23:00->22:59, 01:00->00:59, 09:30->09:29, 13:45->13:44) —— 那正是 AU 上天真地
+    「每 120 根切一刀」会得到的错误结果。`merge_leading_singleton=False` 保留了那条
+    字面路径, 供 A/B。
+    """
+    字面 = build_timeframe(au形状, "2h", merge_leading_singleton=False)
+    assert [f"{x:%H:%M}" for x in 字面.bars.index] == [
+        "22:59", "00:59", "09:29", "13:44", "15:00"]
+    assert np.bincount(字面.bin_of).tolist() == [120, 120, 120, 120, 76]
 
 
 def test_new_timeframes_closed_pos_is_strictly_causal(two_days):
@@ -398,12 +465,25 @@ def test_new_timeframes_closed_pos_is_strictly_causal(two_days):
         assert (np.diff(cp) >= 0).all(), tf
 
 
-def test_2h_bar_count_per_trading_day_depends_on_the_night_tier(two_days):
+@pytest.mark.parametrize("夜盘根数, 期望桶数", [
+    (0, 2),      # 无夜盘: 225 交易分钟 -> 120 + 105
+    (120, 3),    # 至 23:00: 345 -> 120 + 120 + 105
+    (240, 4),    # 至 01:00: 465 -> 120*3 + 105
+    (330, 5),    # 至 02:30 (AU/AG/SC): 555 -> 120*4 + 75
+])
+def test_2h_每交易日桶数只由夜盘档位决定(夜盘根数, 期望桶数):
     """
-    每交易日的 2h 根数随夜盘档位变 —— 这就是「同一个 MA55 在不同品种上不是同一段
-    时间」的根源 (周期-2h.md: 无夜盘 4 / 至23:00 是 6 / 至01:00 是 7 / 至02:30 是 8)。
-    夹具是「至 23:00」那一档, 所以应当是 6。
+    等分之后每交易日的桶数是 `ceil(交易分钟数 / 120)`, 只由夜盘档位决定, 不再受
+    「网格切在哪」影响。这仍然意味着**同一个 MA55 在不同品种上不是同一段时间**
+    (无夜盘 2 桶/日 -> 55 根 ≈ 27.5 个交易日; AU 5 桶/日 -> 11 个交易日), 但至少
+    每一桶现在都是等量的交易时间。
     """
-    tfb = build_timeframe(two_days, "2h")
-    per_day = tfb.bars.groupby("trading_date").size()
-    assert per_day.tolist() == [6, 6]
+    rows = []
+    if 夜盘根数:
+        rows += _bars("2026-03-02", (("21:01", 夜盘根数),), "2026-03-03", 1000.0)
+    rows += _bars("2026-03-03", _DAY_RUNS, "2026-03-03", 2000.0)
+    tfb = build_timeframe(_frame(rows), "2h")
+    assert tfb.n_bars == 期望桶数
+    sizes = np.bincount(tfb.bin_of).tolist()
+    assert sizes[:-1] == [120] * (期望桶数 - 1), sizes
+    assert 0 < sizes[-1] <= 120, sizes

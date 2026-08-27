@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+from lightweight_charts.util import marker_position, marker_shape
 
 # 页面 body 默认用的 system-ui 栈。纯拉丁。
 UI_FONT = (
@@ -53,17 +54,29 @@ def wire_synced_crosshair(root, panes: list[dict], ns: str,
     并刷新自己的图例。
 
     ---------------------------------------------------------------------
-    对齐规则: 一次 lower-bound, 不需要任何映射表
+    对齐规则: 按**开盘**对齐, 一次 upper-bound
     ---------------------------------------------------------------------
     前提是所有网格的标签口径统一为 **bar 末端**, 且粗周期的箱是细周期下标空间上
     一个**连续、稠密、非降**的划分 (`v3_timeframes.py` 的 `_assert_shape` 保证)。
-    于是对任意两个网格 X、Y 和 X 上的任意标签 t:
 
-        t 在 Y 上所属的那根 = Y_labels[lowerBound(Y_labels, t)]      (最小的 >= t)
+    要的语义是: 光标停在 X 的某根 bar 上, Y 上应当高亮**包含这根 X bar 开盘时刻**
+    的那一根。因为标签在末端, 一根 bar 的开盘时刻就是**它上一根的标签**:
 
-    双向都成立, 不必区分细->粗还是粗->细。粗->细时落在那根粗 bar 的**最后一分钟**,
-    这正是想要的。已在 RB/UR/SA/AG/CU/T/B 七个品种上逐 bar 与 `bin_of` 推出的真值
-    比对过, 12 个有向配对零处不一致。
+        s = X_labels[k-1]                          (第 k 根 X bar 的开盘时刻)
+        它在 Y 上所属的那根 = Y_labels[upperBound(Y_labels, s)]     (最小的 > s)
+
+    `upperBound` 而不是 `lowerBound`: 标签 e 的 bar 覆盖 `[e - 周期, e)`, 它含 s
+    当且仅当 `e > s`, 所以要的是**严格大于**。
+
+    用 `X_labels[k-1]` 当开盘时刻在时段断口上也成立: 断口两侧的 X、Y 都在同一个
+    原子段边界上断开 (分箱键带段号), 所以「大于上一段末标签的第一根」在两个网格上
+    指的是同一个时段的第一根。
+
+    ⚠ **曾经用的是 `lowerBound(Y, X[k])`, 那是按收盘对齐的**, 粗->细时会落在那根
+    粗 bar 的**最后一分钟**。AU 实测: 光标放在 30m 的 02:30 (覆盖 02:00-02:30) 上,
+    旧规则指向 15m 的 02:30 (覆盖 02:15-02:30), 而按开盘应当是 15m 的 02:15。
+    用 `bin_of` 当真值逐 bar 比对, 旧规则在 30m->15m 上 749 根错 709 根; 新规则只
+    在窗口第一根 (没有上一根标签可用) 差一个, 那一根退回旧行为。
 
     这条规则替代了 `chart.py:989` 的 `_set_floor_map` —— 那边每个面板要推一本
     `{时刻 -> 时刻}` 字典。
@@ -109,19 +122,38 @@ def wire_synced_crosshair(root, panes: list[dict], ns: str,
                   `legend`: "native" | "div" | None /
                   `mas`: 主图上要一起刷的线 (native 用) /
                   `div_attr` `label` `digits` (div 用)
+                  `extras`: [{"name": 显示名, "line": Line/Histogram, "digits": n}]
+                          —— div 图例要同时显示**多个** series 的值时用 (例如 MACD
+                          面板要一起报 DIF / DEA / 柱)。给了 extras 就不再显示
+                          `series_js` 那一条的值, 只显示 extras 列出的那些。
+                          不给就是老行为, 现有调用点不受影响。
+                          每条 extra 还可带两个可选键:
+                            `empty`  该 series 在这个时刻是 whitespace 时显示的占位
+                                     文案 (例如止损线的「未开仓」)。不给就整条略过
+                                     —— 那是 MACD 一直以来的行为。
+                            `sign`   是否给非负值加 `+` 前缀。默认 True (MACD 要),
+                                     价格类读数应当传 False。
     ns            JS 命名空间表达式, 例如 `window.rb.pb`。必须已经存在。
     snap_sources  {group: 取 `.data()` 的 series JS 表达式}
     """
     src = ", ".join(f"{json.dumps(g)}: {js}" for g, js in snap_sources.items())
     entries = ", ".join(
-        "{{group: {g}, id: {i}, chart: {i}.chart, series: {s}, legend: {lg},"
-        " legendObj: {i}.legend, mas: [{mas}], div: {div}, label: {lb}, digits: {d}}}"
+        "{{group: {g}, id: {i}.id, chart: {i}.chart, series: {s}, legend: {lg},"
+        " legendObj: {i}.legend, mas: [{mas}], div: {div}, label: {lb}, digits: {d},"
+        " extras: [{ex}]}}"
         .format(
             g=json.dumps(p["group"]), i=p["pane"].id, s=p["series_js"],
             lg=json.dumps(p.get("legend")),
             mas=", ".join(f"{ln.id}.series" for ln in p.get("mas", ())),
             div=(f'{p["pane"].id}.{p["div_attr"]}' if p.get("div_attr") else "null"),
             lb=json.dumps(p.get("label", "")), d=int(p.get("digits", 3)),
+            ex=", ".join(
+                "{{n: {n}, s: {sj}.series, d: {dg}, e: {em}, g: {sg}}}".format(
+                    n=json.dumps(e["name"]), sj=e["line"].id, dg=int(e.get("digits", 3)),
+                    em=json.dumps(e.get("empty")) if e.get("empty") else "null",
+                    sg="true" if e.get("sign", True) else "false")
+                for e in p.get("extras", ())
+            ),
         )
         for p in panes
     )
@@ -145,6 +177,12 @@ def wire_synced_crosshair(root, panes: list[dict], ns: str,
                 while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < t) lo = m + 1; else hi = m }
                 return lo
             }
+            // 最小的 j 使 a[j] > t —— 标签 e 的 bar 覆盖 [e-周期, e), 含 s 当且仅当 e > s
+            N.xhairUB = (a, t) => {
+                let lo = 0, hi = a.length
+                while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] <= t) lo = m + 1; else hi = m }
+                return lo
+            }
             // 从 series.data() 现取。零 Python 载荷, 而且结构上不可能与 series
             // 实际持有的数据不一致。1m 帧十几万根时这一趟也就几毫秒, 且只在
             // 数据换过之后的第一次悬停跑。
@@ -165,13 +203,35 @@ def wire_synced_crosshair(root, panes: list[dict], ns: str,
             }
             N.xhairApply = (srcId, t) => {
                 if (!N.xhairSnap) N.xhairBuild()
+                // 把 t (源 bar 的**末端**标签) 换算成这根 bar 的**开盘时刻**:
+                // 标签在末端, 所以开盘时刻就是源网格上**上一根**的标签。
+                // 找不到源网格、或源 bar 就是窗口第一根时, 退回 `t - 1 秒` ——
+                // upperBound(Y, t-1) 恰好等于旧的 lowerBound(Y, t)。
+                let s = (t === null) ? null : t - 1
+                if (t !== null) {
+                    let g = null
+                    for (const q of N.xhairPanes) { if (q.id === srcId) { g = q.group; break } }
+                    const X = (g === null) ? null : N.xhairSnap[g]
+                    if (X && X.length) {
+                        const k = N.xhairLB(X, t)
+                        if (k > 0 && k < X.length) s = X[k - 1]
+                    }
+                }
                 for (const q of N.xhairPanes) {
+                    // 鼠标所在的那一格**必须跳过**: 它已经有自己的原生十字线在跟着
+                    // 光标走, 再 setCrosshairPosition 一条钉在 bar close 上, 两条会
+                    // 互相打架、肉眼可见地频闪。
+                    //
+                    // 两边比的必须是同一种东西: `q.id` 取的是 Handler 的 `id` 字段
+                    // (字符串), `srcId` 来自 `srcPane.id` (同一个字符串)。曾经
+                    // `q.id` 写的是 `{pane.id}` —— 那是 JS **对象**, 与字符串永远
+                    // 不相等, 于是这一句从来没生效过。
                     if (q.id === srcId) continue
                     try {
                         const Y = N.xhairSnap[q.group]
                         if (!Y || !Y.length) continue
                         if (t === null) { clear(q); continue }
-                        const j = N.xhairLB(Y, t)
+                        const j = N.xhairUB(Y, s)
                         if (j >= Y.length) { clear(q); continue }
                         const bar = q.series.dataByIndex(j)
                         if (!bar) { clear(q); continue }
@@ -179,7 +239,27 @@ def wire_synced_crosshair(root, panes: list[dict], ns: str,
                         if (v === undefined || v === null) { clear(q); continue }
                         q.chart.setCrosshairPosition(v, Y[j], q.series)
                         if (q.legend === 'div') {
-                            if (q.div) q.div.innerText = q.label + ': ' + v.toFixed(q.digits)
+                            if (q.div) {
+                                let txt = q.label
+                                if (q.extras && q.extras.length) {
+                                    // 多值: 面板名 + 逐条 series 的读数
+                                    for (const e of q.extras) {
+                                        const eb = e.s.dataByIndex(j)
+                                        if (!eb || eb.value === undefined) {
+                                            // 这一条在这个时刻是 whitespace。给了占位
+                                            // 文案就显示它 (例如止损线的「未开仓」),
+                                            // 没给就沿用旧行为: 整条略过。
+                                            if (e.e) txt += '  ' + e.n + ' ' + e.e
+                                            continue
+                                        }
+                                        const sign = (e.g && eb.value >= 0) ? '+' : ''
+                                        txt += '  ' + e.n + ' ' + sign + eb.value.toFixed(e.d)
+                                    }
+                                } else {
+                                    txt += ': ' + v.toFixed(q.digits)
+                                }
+                                q.div.innerText = txt
+                            }
                             continue
                         }
                         if (q.legend !== 'native') continue
@@ -229,6 +309,112 @@ def invalidate_crosshair_snap(pane, ns: str) -> None:
     字符串执行。只换 markers 不换 K 线时不需要调 (时间轴没动)。
     """
     pane.run_script(f"{{ try {{ {ns}.xhairSnap = null }} catch (e) {{}} }}")
+
+
+def set_markers_exact(pane, markers: list[dict]) -> None:
+    """
+    把 marker 写进图里, **时间用精确的 UTC 秒**, 绕开库自己的 `marker_list`。
+
+    ---------------------------------------------------------------------
+    为什么必须绕开
+    ---------------------------------------------------------------------
+    `SeriesCommon._single_datetime_format` (库, abstract.py) 是:
+
+        arg = self._interval * (arg.timestamp() // self._interval) + self.offset
+
+    也就是把 marker 的时间**向下取整到 `_interval` 的整数倍**。而 `_interval` 是库从
+    数据里猜的 —— `df['time'].diff().value_counts().index[0]`, 即"最常见的相邻 bar
+    间隔"。
+
+    K 线数据走的却是另一条路 (`_df_datetime_format` -> `astype('int64') // 10**9`),
+    **精确、不 floor**。两条路不一致, 于是任何标签不落在 `_interval` 网格上的 bar,
+    它上面的 marker 都被悄悄挪到**更早**的一根。
+
+    中国期货必然踩中: 交易所小节休息与午休会把合成 bar **截短**, 截短的 bar 标签
+    自然偏离网格。59 品种全量实测 (2023-01-01 ~ 2026-07-29):
+
+        1m   iv=60                    0 / 17,384,788  (0.00%)  结构上免疫
+        5m   iv=300                  46 /  3,467,085  (0.00%)  只有数据洞 (CY/TA/CF)
+        15m  iv=900                  27 /  1,155,696  (0.00%)  同上
+        30m  iv=1800             48,056 /    601,872  (7.98%)  56/59 品种中招
+        2h   iv∈{3600,5400,7200} 82,302 /    289,224 (28.46%)  逐品种 14% ~ 100%
+        1d   iv=86400            2,578 /     50,622   (5.09%)  offset 救了 54/59
+
+    **`_interval` 在 2h 上根本不是 7200**: 它是"最常见相邻间隔", 42 个品种是 3600、
+    17 个是 5400, 只有 AG/AU/SC 是 7200。所以不要按"名义周期"去推它。
+
+    `offset` 只能救 1d: `_set_interval` 取 (µs,s,min,hour,day) 五个分量众数里**第一个
+    非零**的那一个, 日线收在 15:00 -> minute 众数 0 跳过 -> hour 众数 15 -> offset
+    54000, 恰好等于 15:00, 逐位相等。但 T/TF/TS 收在 **15:15** -> minute 众数 15 排在
+    hour 前面 -> offset 900, 日线标记全被写到当天 00:15。30m/2h 上 minute 众数恒为 0,
+    offset 恒为 0, 一点忙都帮不上。
+
+    ---------------------------------------------------------------------
+    错到什么程度: 两类后果, 只有一类真的有害
+    ---------------------------------------------------------------------
+    JS 侧 `Series._recalculateMarkers` 调 `timeToIndex(t, findNearest=true)`, 会把
+    时间**向后吸附到第一根 >= 它的 bar**, 两端钳位。于是:
+
+    * floor 到一个**不存在**的时刻 -> 吸附回下一根真实 bar, 往往恰好就是本该标的
+      那根, **自愈**。(T/TF/TS 的 1d 15:15->00:15 属于这类, 858/858 全画对了。)
+    * floor 到**另一根真实 bar** 上 -> 没有东西纠正它, **静默画到更早的一根**。
+      AU 30m `10:15 -> 10:00`、2h `11:30 -> 10:00` / `15:00 -> 14:00` / `02:30 ->
+      02:00` 全是这类 —— 信号被画在**产生它的那根 bar** 上, 而不是它实际可执行的
+      下一根, **看起来就是未来函数**。这才是必须修的那一类。
+
+    ---------------------------------------------------------------------
+    三条必须守住的
+    ---------------------------------------------------------------------
+    * **时间口径与 K 线数据完全一致**: `int(pd.Timestamp(t).value // 10**9)`。
+      `Timestamp.value` 无论自身分辨率一律换算成纳秒, 与 `astype('int64')` 逐位相同
+      (59 品种 × 6 周期 = 22,949,287 根 bar 实测零反例)。前提是 K 线帧的 time 列先过
+      `to_ns` —— pandas 3.x 默认 `datetime64[us]`, 不转的话库写出的是**毫秒数**。
+
+    * **顺序必须已经是升序**, 这里不替调用方排。注意理由: `setMarkers` 全链路**没有
+      任何排序校验**, 乱序不报错, 而是被 `visibleTimedValues` 的二分**静默漏画**
+      (`[1,3,10,20,25,30]` 的 720 种排列里 372 种会丢掉可见区间内的 marker)。
+      所以下面那个 `ValueError` 是我们自己加的闸, 不是在转述库的行为。
+
+    * **本函数是「全量替换」, 而库的 `marker_list` 是「追加」** —— 语义相反。同一个
+      pane 上二者不可混用: 先 exact 再 `marker_list` 会静默吞掉 exact 那批; 反过来
+      也一样; 之后再 `remove_marker` 直接 `KeyError`。**逐层可开的标注要在 Python
+      侧合并成一次调用**, 不要每层调一次(那会只剩最后一层, 且不报错)。
+
+    顺带把 `pane.markers` 清空: 库自己的 `clear_markers()` / `marker_list()` 会读写
+    那个字典再 `setMarkers` 一遍。清空之后, 后续任何一次 `clear_markers()` 都只会
+    发一个空数组 (正确), 而不会用一份陈旧的、被 floor 过的副本把我们覆盖掉。
+    """
+    payload = []
+    上一个 = None
+    for m in markers:
+        t = int(pd.Timestamp(m["time"]).value // 10 ** 9)
+        if 上一个 is not None and t < 上一个:
+            raise ValueError(
+                f"marker 必须按时间升序 —— 乱序不会报错, 会被 visibleTimedValues "
+                f"的二分静默漏画 (在 {m['time']} 处回退)")
+        上一个 = t
+        位 = marker_position(m["position"])
+        if 位 is None:
+            raise ValueError(
+                f"未知 marker position: {m['position']!r} —— 库的 marker_position "
+                f"只认 above/below/inside, 查不到静默返回 None, 而 JS 侧定位 switch "
+                f"没有 default, marker 会被钉死在窗格顶端 y=0 且不报错")
+        形 = marker_shape(m["shape"])
+        if 形 not in ("arrowUp", "arrowDown", "circle", "square"):
+            raise ValueError(
+                f"未知 marker shape: {m['shape']!r} -> {形!r} —— 库的 marker_shape "
+                f"查不到就原样透传, 而 JS 侧绘制 switch 没有 default: 图形不画, "
+                f"文字标签却照画且照样占位, 看起来像文字凭空浮着")
+        payload.append({
+            "time": t,
+            "position": 位,
+            "shape": 形,
+            "color": m["color"],
+            "text": m.get("text", ""),
+        })
+    if hasattr(pane, "markers"):
+        pane.markers.clear()
+    pane.run_script(f"{pane.id}.series.setMarkers({json.dumps(payload)})")
 
 
 def price_dp(price: float) -> int:
