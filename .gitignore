@@ -28,3 +28,9 @@ data/**/*.csv
 # Obsidian: 每次开图/切窗口都会改，diff 全是噪声。
 # graph.json / core-plugins.json 保留在版本里，图谱设置是共享的。
 obsidian/.obsidian/workspace.json
+
+# Clawd 桌宠 —— 纯本地的小玩意儿, 整套都不进版本库 (2026-08-27)。
+.clawd/
+src/clawd_state.py
+src/viz/clawd_pet.py
+src/run_clawd.py
