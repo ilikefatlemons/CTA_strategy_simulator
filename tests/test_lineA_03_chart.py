@@ -264,7 +264,7 @@ def test_建骨架排在任何东西碰window_la3之前(blob):
     assert 建 >= 0 and 建 == 首, f"有脚本早于 建骨架 就碰了 window.la3: {blob[首:首+160]!r}"
 
 
-def test_八个pill都建了(blob):
+def test_九个pill都建了(blob):
     """中文标签是 json.dumps 写进脚本的 (ensure_ascii -> \\uXXXX), 要用同样的编码去找。"""
     for 标 in ("统计", "回调", "大周期反转", "冷静期", "入场双重条件", "止损/吊灯线"):
         assert json.dumps(标) in blob, 标

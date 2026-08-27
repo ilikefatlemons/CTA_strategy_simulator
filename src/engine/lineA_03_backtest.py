@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-lineA-03 回测引擎 —— 逐根 1m, 非向量化。
+lineA-03 回测引擎 —— 逐根 15m, 非向量化。
 
 策略规格见 `docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/goal.md`, 原语在
 `src/strategy/lineA_03.py`。**执行纪律逐字沿用 `src/engine/pullback_v3_backtest.py`**,
@@ -57,7 +57,7 @@ lineA-03 回测引擎 —— 逐根 1m, 非向量化。
 以及四类观测点的 `下标`, **全部是 15m 的下标**, 长度 = `tf["15m"].n_bars`。
 图层要落到别的周期上, 自己经 `tf["15m"]` 的首/末 1m 成分换算。
 
-`首` / `末` 这两个映射在引擎内部只用于两件事, 都与价格无关:
+`首` 这个映射在引擎内部只用于两件事, 都与价格无关 (`末` 图层自己算, 引擎不用):
   * 把 1m 层的窗口形状旗标 (`tradable` / `in_window` / `is_session_first`) 折到 15m
   * 把 2h / 30m 的 `closed_pos` 取在「本根 15m 开盘那一刻」
 
@@ -111,7 +111,8 @@ from src.strategy.lineA_03 import (
 )
 from src.strategy.pullback import gap_filled
 
-# 本引擎用到的周期。1m 是驱动时钟; 5m 只给图看, 引擎一个字都不读它。
+# 本引擎用到的周期。**驱动时钟是 15m**; 1m 只出窗口形状与 closed_pos 的取样点,
+# 一个 1m 价格都不读; 5m 只给图看, 引擎一个字都不碰它。
 计算周期: tuple[str, ...] = ("1m", "5m", "15m", "30m", "2h")
 
 # 出场理由。**只有两种** —— 无部分止盈, 无时段末强平。
@@ -145,7 +146,7 @@ class 一笔:
     出场下标: int
     出场时间: pd.Timestamp
     出场价: float
-    理由: str                    # SL | TP
+    理由: str                    # SL (固定止损) | TRAIL (吊灯, 可盈可亏)
     仓位比例: float              # 恒为 1.0 —— 本策略无部分止盈
     跳空成交: bool               # True = 按 bar 的 open 成交, 不是按线
     固定止损位: float            # 审计/展示用
@@ -244,10 +245,9 @@ def 跑回测(
 
     ATR险 = np.asarray(atr_series(险.bars, p.ATR周期), dtype="float64")
 
-    # 每根 15m 的首 / 末 1m 成分下标。**只用来把 1m 层的窗口形状旗标、以及高周期的
+    # 每根 15m 的首个 1m 成分下标。**只用来把 1m 层的窗口形状旗标、以及高周期的
     # `closed_pos` 折算到 15m 上**, 一个价格都不从这里取。
     首 = np.flatnonzero(np.r_[True, 回.bin_of[1:] != 回.bin_of[:-1]])
-    末 = np.r_[首[1:] - 1, len(df) - 1]
 
     # 「截至 15m bar i **开盘那一刻**, 各周期最后一根已收盘 bar 是哪根」。
     # 15m bar i 的开盘时刻 == 它首个 1m 成分的开盘时刻, 所以直接取 1m 层算好的
