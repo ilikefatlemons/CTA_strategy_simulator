@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-lineA-03 回测引擎 —— 逐根 15m, 非向量化。
+lineA-03 回测引擎 —— 逐根驱动 bar, 非向量化。
 
 策略规格见 `docs/02-lineA-多周期回调/A3-单个自洽策略实施+改进/20260824-骨架+前端phase/goal.md`, 原语在
 `src/strategy/lineA_03.py`。**执行纪律逐字沿用 `src/engine/pullback_v3_backtest.py`**,
@@ -9,23 +9,29 @@ lineA-03 回测引擎 —— 逐根 15m, 非向量化。
 ---------------------------------------------------------------------------
 无未来函数, 逐行可审计    （与 pullback_v3_backtest.py:14-47 同形的一张表）
 ---------------------------------------------------------------------------
-**驱动时钟是 15m。`i` 从头到尾都是 15m 的下标, 引擎一个 1m 价格都不读。**
+**驱动时钟是 `参数.驱动周期` (默认 1m)。`i` 从头到尾都是它的下标。**
+信号层不跟着它走: 大周期永远读 2h 自己的已收盘 bar, 回调与两个锁永远读 15m 的。
+下表里的「钟」= 驱动周期, 「i」= 驱动 bar 的下标。
 
     步骤                     读取的数据                                触及的最新 bar
  1  冷静期(2h 门控)          2h 三线排列, 取 已收盘下标2h[i]            2h 的 i-1
  2  大周期方向               2h 粘性排列, 取 已收盘下标2h[i]            2h 的 i-1
- 3  回调闩锁                 15m 三线排列, 下标 i-1                     15m 的 i-1
- 4  锁1 / 锁2                15m 收盘·MA21 / DIF·DEA, 下标 i-1          15m 的 i-1
- 5  入场闸门                 可交易[i] & 暖机[i] & !时段首根[i]         i — 窗口形状, 与价格无关
- 6  入场成交                 15m 开盘价[i]                              i — 开盘价
+ 3  回调闩锁                 15m 三线排列, 取 已收盘下标15m[i]          15m 的 i-1
+ 4  锁1 / 锁2                15m 收盘·MA21 / DIF·DEA, 同上              15m 的 i-1
+ 5  入场闸门                 可交易[i] & 暖机[i] & !竞价根[i]           i — 窗口形状, 与价格无关
+ 6  入场成交                 钟 开盘价[i]                               i — 开盘价
  7  初始止损(冻结)           30m ATR(14), 取 已收盘下标30m[i]           30m 的 i-1
- 8  有效止损触发判定          15m 最低价[i] / 最高价[i]                  i — 事件本身
- 9  跳空补价                 15m 开盘价[i]                              i — 成交那一刻已知
-10  吊灯线                   持仓极值(**截至 15m 的 i-1**) + 冻结 ATR₀   15m 的 i-1
+ 8  有效止损触发判定          钟 最低价[i] / 最高价[i]                   i — 事件本身
+ 9  跳空补价                 钟 开盘价[i]                               i — 成交那一刻已知
+10  吊灯线                   持仓极值(**截至钟的 i-1**) + 冻结 ATR₀      钟 的 i-1
      (同时记下不带地板的 `吊灯原线`, 仅观测, 不参与判定)
-11  极值折入                 15m 最高价[i] / 最低价[i] —— **测试之后**  i, 但只影响 i+1
-12  逐根 mark-to-market      15m 收盘价[i]                              i
+11  极值折入                 钟 最高价[i] / 最低价[i] —— **测试之后**   i, 但只影响 i+1
+12  逐根 mark-to-market      钟 收盘价[i]                               i
 13  冷静期区间记录           冻结中                                     i — bar 末尾
+
+第 8 步带一个守卫: `一根bar只做一个动作` 开着时(默认), 本根开的仓本根**不测出场** ——
+同根既开又平要求知道 bar 内部「先到开盘价还是先到止损位」的次序, 而这一版的立场恰恰
+是不知道。副作用: 入场那一根没有止损线, 引擎与图层两处测试都把这条不对称钉死了。
 
 唯一结构上危险的是第 11 步(极值折入), 已经放在出场测试之后并带 `批 is not None`
 守卫 —— 与 `pullback_v3_backtest.py:547-552` / `rbreaker_backtest.py:230-231` 同形。
@@ -39,14 +45,18 @@ lineA-03 回测引擎 —— 逐根 15m, 非向量化。
 第 5 步不是未来函数: 时段划分与收盘时间都是**窗口形状**属性, 由 session_id 单独
 决定, 循环开始前就已全部确定, 不是任何价格的函数 (`v3_sessions.py:268-273`)。
 
-高周期(2h / 30m)一律经 `closed_pos` 在**本根 15m 开盘那一刻**取值; 15m 自己的
+各周期一律经 `closed_pos` 在**本根驱动 bar 开盘那一刻**取值; 驱动周期自己的
 `closed_pos` 恒等于 `i-1`, 引擎启动时断言这一条 —— 那是「只用 bar i-1 及更早」的
-机械凭据。**5m 完全不参与计算**, 它只是屏幕上的第四格。
+机械凭据。**5m / 1d 完全不参与计算**, 它们只是屏幕上的格子。
 
-为什么不再用 1m 驱动 (2026-08-26 改): 1m 驱动等于假装知道 15m bar 的内部走势。
-这一版的立场是**不知道**: 每个周期只用它自己那条 bar 序列, 极值只累计到 i-1。
-代价是止损每 15 分钟才检查一次, 成交更差、笔数更少 —— 这是刻意的, 初稿先要口径
-干净。后续要加 1m 精度做校正是另一件事, 不在这一版。
+驱动周期只决定「多久看一眼价格」, 不决定任何信号读哪一根。所以 1m 驱动**不会增加
+笔数**: 三条腿全在 15m 及以上, 15m 信号在一个 15m 箱内是常数, 入场仍落在该箱第一根
+1m, open 与 15m 的 open 逐字节相同 (AU 实测 103 笔全同, 价差 0)。变的只有出场 ——
+止损从每 15 分钟查一次变成每分钟一次, 中位提前 10 分钟。
+
+第 5 步挡的是**集合竞价撮合根**而不是「时段首根」。判据见 `v3_timeframes._竞价根`:
+AU 上竞价根 268 根全在 21:00、零振幅 100%、成交中位 99 手; 而 09:01 那 274 根段首根
+是真实可交易的白盘第一分钟 (零振幅 0%, 成交中位 2266 手), 不许挡。
 
 机械凭据是截断法, 不是这张表: `tests/test_lineA_03_backtest.py`。
 
@@ -102,8 +112,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from src.data.v3_sessions import Prepared
-from src.data.v3_timeframes import TFBars, build_timeframes
+from src.data.v3_sessions import Prepared, derive_segments
+from src.data.v3_timeframes import TFBars, _竞价根, build_timeframes
 from src.indicators import atr as atr_series
 from src.strategy.lineA_03 import (
     多, 未定, 三线状态, 吊灯线, 固定止损, 大周期状态, 完全反向,
@@ -227,10 +237,11 @@ def 跑回测(
 
     # ---------------------------------------------------------- 预计算 ----
     大 = tf[p.大周期]          # 2h  方向 + 冷静期
-    回 = tf[p.回调周期]        # 15m **唯一驱动时钟** —— 回调、两个锁、成交、出场都在它上面
+    回 = tf[p.回调周期]        # 15m 回调判定 + 两个锁 (**信号层**, 不是时钟)
     险 = tf[p.风险周期]        # 30m 只出一个 ATR₀, 不参与任何时序判定
+    钟 = tf[p.驱动周期]        # **驱动时钟** —— 成交、出场触发、极值、MTM 都在它上面
 
-    n = 回.n_bars
+    n = 钟.n_bars
     if n == 0:
         return _空结果(prepared, p, cfg)
 
@@ -245,38 +256,54 @@ def 跑回测(
 
     ATR险 = np.asarray(atr_series(险.bars, p.ATR周期), dtype="float64")
 
-    # 每根 15m 的首个 1m 成分下标。**只用来把 1m 层的窗口形状旗标、以及高周期的
-    # `closed_pos` 折算到 15m 上**, 一个价格都不从这里取。
-    首 = np.flatnonzero(np.r_[True, 回.bin_of[1:] != 回.bin_of[:-1]])
+    # 每根驱动 bar 的首个 1m 成分下标。**只用来把 1m 层的窗口形状旗标、以及各周期的
+    # `closed_pos` 折算到驱动周期上**, 一个价格都不从这里取。
+    # 驱动周期就是 1m 时它退化成 arange, 下面所有 `[首]` 取样都成了恒等。
+    首 = np.flatnonzero(np.r_[True, 钟.bin_of[1:] != 钟.bin_of[:-1]])
 
-    # 「截至 15m bar i **开盘那一刻**, 各周期最后一根已收盘 bar 是哪根」。
-    # 15m bar i 的开盘时刻 == 它首个 1m 成分的开盘时刻, 所以直接取 1m 层算好的
+    # 「截至驱动 bar i **开盘那一刻**, 各周期最后一根已收盘 bar 是哪根」。
+    # 驱动 bar i 的开盘时刻 == 它首个 1m 成分的开盘时刻, 所以直接取 1m 层算好的
     # `closed_pos` 在 `首[i]` 处的值 —— 语义逐位等同, 不必另算一遍。
     c大 = 大.closed_pos[首].astype(np.int64)
     c险 = 险.closed_pos[首].astype(np.int64)
     c回 = 回.closed_pos[首].astype(np.int64)
-    # **驱动时钟因果性的机械凭据**: 15m 自己的「已收盘」必须恒等于 i-1。
+    c钟 = 钟.closed_pos[首].astype(np.int64)
+    # **驱动时钟因果性的机械凭据**: 驱动周期自己的「已收盘」必须恒等于 i-1。
     # 破了这条, 「只用 bar i-1 及更早」就无从谈起。
-    if not np.array_equal(c回, np.arange(n, dtype=np.int64) - 1):
-        raise ValueError("15m 的 closed_pos 不恒等于 i-1 —— 驱动时钟的因果性破了")
+    if not np.array_equal(c钟, np.arange(n, dtype=np.int64) - 1):
+        raise ValueError(
+            f"{p.驱动周期} 的 closed_pos 不恒等于 i-1 —— 驱动时钟的因果性破了")
 
-    # 价格一律取自 **15m 自己的 bar**。1m 的 OHLC 引擎一个字都不读。
-    op = 回.bars["open"].to_numpy("float64")
-    hi = 回.bars["high"].to_numpy("float64")
-    lo = 回.bars["low"].to_numpy("float64")
-    cl = 回.bars["close"].to_numpy("float64")
-    时刻 = 回.bars.index.to_numpy()
-    交易日列 = 回.bars["trading_date"].to_numpy()
-    # 15m 箱不跨原子段, 段不跨 trading_date, 所以整箱同一个 session_id, 取首根即可。
+    # 价格一律取自**驱动周期自己的 bar**。
+    op = 钟.bars["open"].to_numpy("float64")
+    hi = 钟.bars["high"].to_numpy("float64")
+    lo = 钟.bars["low"].to_numpy("float64")
+    cl = 钟.bars["close"].to_numpy("float64")
+    时刻 = 钟.bars.index.to_numpy()
+    交易日列 = 钟.bars["trading_date"].to_numpy()
+    # 箱不跨原子段, 段不跨 trading_date, 所以整箱同一个 session_id, 取首根即可。
     时段号列 = df["session_id"].to_numpy("int64")[首]
 
-    # 窗口形状旗标折到 15m: 「整根都可交易」取与, 「箱内含时段首根」取或 ——
-    # 后者是因为集合竞价那一根被并进了本段第一个 15m 箱, 那一箱同样不许开仓。
+    # ------------------------------------------------------------ 闸门 ----
+    # **挡的是集合竞价撮合根, 不是「时段首根」。** 两者不是一回事:
+    #
+    #   竞价根        AU 268 根, 全在 21:00, 零振幅 100%, 成交中位 99 手
+    #                 —— 一个撮合价, 没有连续交易, 按这个价成交是假的
+    #   只是段首根    AU 另有 274 根 09:01, 零振幅 0%, 成交中位 2266 手
+    #                 —— 白盘第一分钟, 是**真实可交易**的
+    #
+    # 判据见 `v3_timeframes._竞价根`: 段首根且与下一根落在不同的 30 分钟时钟格。
+    # 它的 docstring 已经写明「AU 的白盘数据里确实没有竞价根, 夜盘 21:00 才有」。
+    # 之前用 `is_session_first` 当闸门, 把那 274 根白盘首分钟一起挡了 —— 那是错的。
+    竞价 = _竞价根(df, derive_segments(df))
+
+    # 折到驱动周期。**驱动周期就是 1m 时这三行全是恒等**, 折叠这件事本身只是粗时钟
+    # 的产物: 一根 15m 要么整根能开仓要么整根不能, 没有中间态可表达。
     可交易 = np.logical_and.reduceat(df["tradable"].to_numpy(bool), 首)
     在窗口 = np.logical_and.reduceat(np.asarray(prepared.in_window, dtype=bool), 首)
-    时段首根 = np.logical_or.reduceat(df["is_session_first"].to_numpy(bool), 首)
+    含竞价 = np.logical_or.reduceat(竞价, 首)
     # 入场闸门: 窗口形状属性, 与价格无关。
-    可入场 = 可交易 & 在窗口 & ~时段首根
+    可入场 = 可交易 & 在窗口 & ~含竞价
 
     # ------------------------------------------------------------ 状态 ----
     批: _持仓 | None = None
@@ -348,7 +375,11 @@ def 跑回测(
             )
 
         # -------------------------------------------------- 7~10) 出场 ----
-        if 批 is not None and 批.入场下标 <= i:
+        # `一根bar只做一个动作` 开着时守卫是 `<` —— 本根开的仓本根不测出场。
+        # 同根既开又平要求知道 bar 内部「先到开盘价还是先到止损位」的次序, 而这一
+        # 版的立场恰恰是**不知道**。15m 时代实测 100 笔里有 1 笔是同根开平的。
+        if 批 is not None and (批.入场下标 < i if cfg.一根bar只做一个动作
+                               else 批.入场下标 <= i):
             是多 = 批.方向 == 多
             bo, bh, bl = op[i], hi[i], lo[i]
 
@@ -425,7 +456,7 @@ def 跑回测(
 
     # 暖机段按 15m 根数切。切点是 trading_date 边界, 而 15m 箱不跨 trading_date,
     # 所以边界处不会出现半根被切开的箱。
-    w = 回.first_bin_at_or_after(prepared.warmup_bars)
+    w = 钟.first_bin_at_or_after(prepared.warmup_bars)
     idx = pd.DatetimeIndex(时刻[w:], name="datetime")
     eq = pd.Series(权益[w:], index=idx)
     eq = eq / eq.iloc[0] if len(eq) else eq

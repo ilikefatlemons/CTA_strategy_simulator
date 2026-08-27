@@ -664,7 +664,7 @@ def 标记(结果: 回测结果, tfb: TFBars, 起箱: int, 基: TFBars,
 def 推全部(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回测结果,
           参数) -> None:
     """全量重画。切品种时调。"""
-    基 = tf["15m"]
+    基 = tf[结果.参数.驱动周期]
     for 名 in 周期集:
         t, tfb = 瓦片们[名], tf[名]
         起 = 起箱of(tfb, 结果, 基)
@@ -698,7 +698,7 @@ def 推标记(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回�
     于是所有被时段断口截短的 bar (30m 的 10:15、2h 的 02:30/11:30/15:00 …) 上的
     标记都被挪到更早的一根, 看起来就像用了未来数据。见 `set_markers_exact`。
     """
-    基 = tf["15m"]
+    基 = tf[结果.参数.驱动周期]
     for 名 in 周期集:
         t, tfb = 瓦片们[名], tf[名]
         起 = 起箱of(tfb, 结果, 基)

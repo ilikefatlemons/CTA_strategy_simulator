@@ -52,12 +52,19 @@ def 参数(数据):
     return 数据[2].参数
 
 
+@pytest.fixture(scope="module")
+def 钟(数据):
+    """驱动周期的 `TFBars` —— 引擎所有下标都活在它的下标空间里, 图层换算的基。"""
+    _, tf, 结果 = 数据
+    return tf[结果.参数.驱动周期]
+
+
 # =========================================================== 表 =============
 @pytest.mark.parametrize("名", C.周期集)
-def test_K线帧切干净了暖机段(数据, 名):
+def test_K线帧切干净了暖机段(数据, 名, 钟):
     _, tf, 结果 = 数据
     tfb = tf[名]
-    起 = C.起箱of(tfb, 结果, tf['15m'])
+    起 = C.起箱of(tfb, 结果, 钟)
     df = C.K线帧(tfb, 起)
     assert 0 < len(df) == tfb.n_bars - 起
     # 首根可见 K 线的**末端标签** >= 显示窗口首根 1m 的时刻
@@ -65,18 +72,18 @@ def test_K线帧切干净了暖机段(数据, 名):
 
 
 @pytest.mark.parametrize("名", C.周期集)
-def test_K线帧不带volume列(数据, 名):
+def test_K线帧不带volume列(数据, 名, 钟):
     """带上 volume 库会自动建成交量副图, 把三层版面挤扁。"""
     _, tf, 结果 = 数据
-    起 = C.起箱of(tf[名], 结果, tf['15m'])
+    起 = C.起箱of(tf[名], 结果, 钟)
     assert list(C.K线帧(tf[名], 起).columns) == ["time", "open", "high", "low", "close"]
 
 
 @pytest.mark.parametrize("名", C.周期集)
-def test_MA首根可见K线上就已经是热的(数据, 名):
+def test_MA首根可见K线上就已经是热的(数据, 名, 钟):
     """在全帧(含暖机段)上滚完再切显示段 —— 否则首根 MA55 是 NaN。"""
     _, tf, 结果 = 数据
-    起 = C.起箱of(tf[名], 结果, tf['15m'])
+    起 = C.起箱of(tf[名], 结果, 钟)
     for 期 in C.MA周期:
         df = C.MA帧(tf[名], 期, 起)
         assert len(df) == tf[名].n_bars - 起
@@ -84,9 +91,9 @@ def test_MA首根可见K线上就已经是热的(数据, 名):
 
 
 @pytest.mark.parametrize("名", C.周期集)
-def test_ATR与MACD与K线逐元素对齐(数据, 名, 参数):
+def test_ATR与MACD与K线逐元素对齐(数据, 名, 参数, 钟):
     _, tf, 结果 = 数据
-    起 = C.起箱of(tf[名], 结果, tf['15m'])
+    起 = C.起箱of(tf[名], 结果, 钟)
     k = C.K线帧(tf[名], 起)
     a = C.ATR帧(tf[名], 起, 参数.ATR周期)
     d, e, h = C.MACD帧(tf[名], 起, 参数.MACD快, 参数.MACD慢, 参数.MACD信号)
@@ -96,10 +103,10 @@ def test_ATR与MACD与K线逐元素对齐(数据, 名, 参数):
 
 
 @pytest.mark.parametrize("名", C.周期集)
-def test_MACD柱逐点着色(数据, 名, 参数):
+def test_MACD柱逐点着色(数据, 名, 参数, 钟):
     """不逐点着色的话会有点渲染成黑色 (`chart.py:252-257` 记着)。"""
     _, tf, 结果 = 数据
-    起 = C.起箱of(tf[名], 结果, tf['15m'])
+    起 = C.起箱of(tf[名], 结果, 钟)
     _, _, h = C.MACD帧(tf[名], 起, 参数.MACD快, 参数.MACD慢, 参数.MACD信号)
     assert "color" in h.columns
     assert set(h["color"].unique()) <= {C.柱正, C.柱负}
@@ -107,14 +114,14 @@ def test_MACD柱逐点着色(数据, 名, 参数):
     assert (h.loc[h["柱"] < 0, "color"] == C.柱负).all()
 
 
-def test_冷静期涂的箱与区间独立重算的结果一致(数据):
+def test_冷静期涂的箱与区间独立重算的结果一致(数据, 钟):
     _, tf, 结果 = 数据
     tfb = tf["2h"]
-    起 = C.起箱of(tfb, 结果, tf['15m'])
-    df = C.冷静期帧(结果, tfb, 起, tf['15m'])
+    起 = C.起箱of(tfb, 结果, 钟)
+    df = C.冷静期帧(结果, tfb, 起, 钟)
     assert df is not None and (df["冷静期"] == 1.0).all()
     # 冷静期区间是 **15m** 下标的闭区间, 先换回 1m 再问 2h 的箱号
-    首, 末 = C.驱动到1m(tf["15m"])
+    首, 末 = C.驱动到1m(钟)
     应涂 = set()
     for a, b in 结果.冷静期区间:
         段 = tfb.bin_of[int(首[a]):int(末[b]) + 1]
@@ -123,19 +130,19 @@ def test_冷静期涂的箱与区间独立重算的结果一致(数据):
     assert 实涂 == 应涂
 
 
-def test_没有冷静期时返回None(数据):
+def test_没有冷静期时返回None(数据, 钟):
     import dataclasses
     _, tf, 结果 = 数据
     空 = dataclasses.replace(结果, 冷静期区间=[])
-    assert C.冷静期帧(空, tf["2h"], 0, tf["15m"]) is None
+    assert C.冷静期帧(空, tf["2h"], 0, 钟) is None
 
 
 # ========================================================= 标记 =============
 @pytest.mark.parametrize("名", C.周期集)
-def test_标记已排序且都落在真实K线上(数据, 名):
+def test_标记已排序且都落在真实K线上(数据, 名, 钟):
     _, tf, 结果 = 数据
-    起 = C.起箱of(tf[名], 结果, tf['15m'])
-    ms = C.标记(结果, tf[名], 起, tf['15m'], 回调=True, 反转=True, 锁=True)
+    起 = C.起箱of(tf[名], 结果, 钟)
+    ms = C.标记(结果, tf[名], 起, 钟, 回调=True, 反转=True, 锁=True)
     assert ms
     时 = [m["time"] for m in ms]
     assert 时 == sorted(时), "marker_list 不排序, setMarkers 收到乱序会直接报错"
@@ -143,39 +150,39 @@ def test_标记已排序且都落在真实K线上(数据, 名):
     assert all(t in 合法 for t in 时)
 
 
-def test_默认只有入场与出场箭头(数据):
+def test_默认只有入场与出场箭头(数据, 钟):
     """**默认全关** —— 这是这个窗口的硬要求。"""
     _, tf, 结果 = 数据
-    起 = C.起箱of(tf["15m"], 结果, tf['15m'])
-    ms = C.标记(结果, tf['15m'], 起, tf['15m'])
+    起 = C.起箱of(钟, 结果, 钟)
+    ms = C.标记(结果, 钟, 起, 钟)
     assert ms
     assert {m["shape"] for m in ms} <= {"arrow_up", "arrow_down"}
     assert not any(m["shape"] in ("circle", "square") for m in ms)
 
 
-def test_三个标注开关各自只加自己那一类(数据):
+def test_三个标注开关各自只加自己那一类(数据, 钟):
     _, tf, 结果 = 数据
-    tfb, 起 = tf["15m"], C.起箱of(tf["15m"], 结果, tf['15m'])
-    基 = C.标记(结果, tfb, 起, tf['15m'])
+    tfb, 起 = 钟, C.起箱of(钟, 结果, 钟)
+    基 = C.标记(结果, tfb, 起, 钟)
     for 键, 色 in (("回调", C.回调色), ("反转", C.反转色)):
-        开 = C.标记(结果, tfb, 起, tf['15m'], **{键: True})
+        开 = C.标记(结果, tfb, 起, 钟, **{键: True})
         加 = [m for m in 开 if m.get("color") == 色]
         assert 加, f"{键} 打开后一个标记都没加"
         assert len(开) == len(基) + len(加)
-    开锁 = C.标记(结果, tfb, 起, tf['15m'], 锁=True)
+    开锁 = C.标记(结果, tfb, 起, 钟, 锁=True)
     锁标 = [m for m in 开锁 if m.get("color") in (C.锁1色, C.锁2色)]
     assert 锁标 and len(开锁) == len(基) + len(锁标)
     # 两个锁必须用不同颜色, 否则「双重条件」看不出是哪一个先开
     assert {m["color"] for m in 锁标} == {C.锁1色, C.锁2色}
 
 
-def test_出场箭头按结果着色而不是只按理由(数据):
+def test_出场箭头按结果着色而不是只按理由(数据, 钟):
     """
     吊灯是追踪止损, 可盈可亏。绿/琥珀分开染, 才不会被「绿色=止盈」骗过去。
     """
     _, tf, 结果 = 数据
-    起 = C.起箱of(tf["15m"], 结果, tf['15m'])
-    ms = C.标记(结果, tf['15m'], 起, tf['15m'])
+    起 = C.起箱of(钟, 结果, 钟)
+    ms = C.标记(结果, 钟, 起, 钟)
     色 = {m["color"] for m in ms}
     assert C.止损色 in 色 and C.吊灯盈色 in 色 and C.吊灯亏色 in 色, (
         f"三种出场配色没都出现: {色}")
@@ -183,11 +190,11 @@ def test_出场箭头按结果着色而不是只按理由(数据):
     assert any(t.startswith("吊灯亏") for t in 文)
 
 
-def test_标记不伸进暖机段(数据):
+def test_标记不伸进暖机段(数据, 钟):
     _, tf, 结果 = 数据
     for 名 in C.周期集:
-        起 = C.起箱of(tf[名], 结果, tf['15m'])
-        ms = C.标记(结果, tf[名], 起, tf['15m'], 回调=True, 反转=True, 锁=True)
+        起 = C.起箱of(tf[名], 结果, 钟)
+        ms = C.标记(结果, tf[名], 起, 钟, 回调=True, 反转=True, 锁=True)
         assert all(m["time"] >= tf[名].bars.index[起] for m in ms)
 
 
@@ -224,7 +231,7 @@ def test_每个周期至少出现在一页上():
         assert C.GRID.get(tf), f"{tf} 建了瓦片却没有任何一页显示它"
 
 
-def test_面板html带着三条声明(数据):
+def test_面板html带着三条声明(数据, 钟):
     _, tf, 结果 = 数据
     每日 = tf["2h"].n_bars / 数据[0].df["trading_date"].nunique()
     html = C.面板html(算统计(结果, 每日))
@@ -458,7 +465,7 @@ def _每根的首个1m(tfb) -> np.ndarray:
 
 @pytest.mark.parametrize("源", C.周期集)
 @pytest.mark.parametrize("靶", C.周期集)
-def test_十字线按开盘对齐(数据, 源, 靶):
+def test_十字线按开盘对齐(数据, 源, 靶, 钟):
     """
     光标停在源网格的某根 bar 上, 靶网格应当高亮**包含这根 bar 开盘时刻**的那一根。
 
@@ -541,7 +548,7 @@ def test_marker时间戳精确落在bar上_不被floor(数据, blob):
             f" 首个: {pd.Timestamp(载[0]['time'], unit='s')}")
 
 
-def test_这条测试不是空真_确实有偏离网格的bar(数据):
+def test_这条测试不是空真_确实有偏离网格的bar(数据, 钟):
     """
     守卫上一条: 若所有 bar 标签都恰好在 `_interval` 网格上, floor 与不 floor 毫无
     区别, 上面那条就是空真。这里断言 30m / 2h 上**确实存在**偏离网格的 bar。
@@ -636,7 +643,7 @@ def test_set_markers_exact本身不floor也不容忍乱序():
 
 
 # ================================================ 止损线 / 吊灯线 =============
-def test_两条止损线的值都能在1m原始序列里找到出处(数据):
+def test_两条止损线的值都能在1m原始序列里找到出处(数据, 钟):
     """
     图上每一个点都必须是引擎逐 1m 记的 `止损线` 里真实出现过的值, 不能是图层自己
     算出来的 —— 图层一旦自己算, 它和引擎就可能不一致, 而这两条线的**全部意义**
@@ -645,8 +652,8 @@ def test_两条止损线的值都能在1m原始序列里找到出处(数据):
     _, tf, 结果 = 数据
     for 名 in C.周期集:
         tfb = tf[名]
-        起 = C.起箱of(tfb, 结果, tf['15m'])
-        固帧, 吊帧 = C.止损吊灯帧(结果, tfb, 起, tf['15m'])
+        起 = C.起箱of(tfb, 结果, 钟)
+        固帧, 吊帧 = C.止损吊灯帧(结果, tfb, 起, 钟)
         assert len(固帧) == len(吊帧) == tfb.n_bars - 起
         for 帧, 列 in ((固帧, "固定止损"), (吊帧, "吊灯")):
             v = 帧[列].to_numpy("float64")
@@ -657,11 +664,11 @@ def test_两条止损线的值都能在1m原始序列里找到出处(数据):
                 成员 = np.flatnonzero(tfb.bin_of == b)
                 # 引擎数组是 **15m** 索引的, 铺回 1m 再按本格的成员取值
                 源列 = (结果.固定止损线 if 列 == "固定止损" else 结果.吊灯原线)
-                源 = set(源列[tf["15m"].bin_of][成员[0]:成员[-1] + 1])
+                源 = set(源列[钟.bin_of][成员[0]:成员[-1] + 1])
                 assert v[k] in 源, f"{名} bin {b} 的「{列}」={v[k]} 不在 1m 序列里"
 
 
-def test_两条线同生同死_且吊灯从入场就画(数据):
+def test_两条线同生同死_且吊灯从入场就画(数据, 钟):
     """
     2026-08-26 改: 吊灯**从入场就画**, 包括它还压在固定止损更差一侧的那一段 ——
     否则看不见两条线什么时候相交, 而交叉点正是「吊灯开始接管」的时刻。
@@ -674,8 +681,8 @@ def test_两条线同生同死_且吊灯从入场就画(数据):
     _, tf, 结果 = 数据
     for 名 in C.周期集:
         tfb = tf[名]
-        起 = C.起箱of(tfb, 结果, tf['15m'])
-        固帧, 吊帧 = C.止损吊灯帧(结果, tfb, 起, tf['15m'])
+        起 = C.起箱of(tfb, 结果, 钟)
+        固帧, 吊帧 = C.止损吊灯帧(结果, tfb, 起, 钟)
         a = 固帧["固定止损"].to_numpy("float64")
         b = 吊帧["吊灯"].to_numpy("float64")
         assert np.array_equal(np.isnan(a), np.isnan(b)), f"{名} 两条线的有值区间不一致"
@@ -689,7 +696,7 @@ def test_两条线同生同死_且吊灯从入场就画(数据):
             f"{名} 上吊灯从来没有低于固定止损 —— 入场那一段的吊灯没画出来")
 
 
-def test_空仓的箱两条线都留断口(数据):
+def test_空仓的箱两条线都留断口(数据, 钟):
     """
     整箱没有仓位 -> NaN -> 库的 `js_data` 把它剔成只剩 time 的 whitespace 行。
 
@@ -700,19 +707,22 @@ def test_空仓的箱两条线都留断口(数据):
     箱必须是 NaN, 否则连点画法也会在那儿多画一个点。
     """
     _, tf, 结果 = 数据
-    tfb = tf["15m"]
-    起 = C.起箱of(tfb, 结果, tf['15m'])
-    固帧, _ = C.止损吊灯帧(结果, tfb, 起, tf['15m'])
+    tfb = 钟
+    起 = C.起箱of(tfb, 结果, 钟)
+    固帧, _ = C.止损吊灯帧(结果, tfb, 起, 钟)
     v = 固帧["固定止损"].to_numpy("float64")
     assert np.isnan(v).any(), "一个空仓的箱都没有 —— 这条测试是空真的"
-    # `止损线` 是 15m 长的; 先在 15m 空间标出持仓, 再铺回 1m
-    持仓15 = np.zeros(len(结果.止损线), dtype=bool)
+    # 「该有线」的那些驱动 bar: 持仓区间去掉入场根 —— `一根bar只做一个动作` 开着时
+    # 本根不进出场块, 所以入场那一根本来就没有线 (引擎侧由
+    # `test_三条止损线满足取大取小的恒等式` 钉死)。
+    有线 = np.zeros(len(结果.止损线), dtype=bool)
     for t in 结果.交易:
-        持仓15[t.入场下标:t.出场下标 + 1] = True
-    持仓 = 持仓15[tf["15m"].bin_of]
+        起根 = t.入场下标 + (1 if 结果.开关.一根bar只做一个动作 else 0)
+        有线[起根:t.出场下标 + 1] = True
+    有线1m = 有线[钟.bin_of]
     for k in np.flatnonzero(np.isnan(v))[:400]:
         成员 = np.flatnonzero(tfb.bin_of == 起 + int(k))
-        assert not 持仓[成员].any(), f"bin {起 + int(k)} 有仓位却被留了断口"
+        assert not 有线1m[成员].any(), f"bin {起 + int(k)} 有仓位却被留了断口"
 
 
 def test_止损线画成逐根圆点而不是折线(blob):
