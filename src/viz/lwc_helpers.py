@@ -133,6 +133,10 @@ def wire_synced_crosshair(root, panes: list[dict], ns: str,
                                      —— 那是 MACD 一直以来的行为。
                             `sign`   是否给非负值加 `+` 前缀。默认 True (MACD 要),
                                      价格类读数应当传 False。
+                            `flag_line` / `flag_text`
+                                     再查一条 series: 它在这个时刻**有值**就把
+                                     `flag_text` 缀在读数后面 (例如吊灯被止盈阀门挡住
+                                     时缀「（禁用）」)。两个都不给就没有这层。
     ns            JS 命名空间表达式, 例如 `window.rb.pb`。必须已经存在。
     snap_sources  {group: 取 `.data()` 的 series JS 表达式}
     """
@@ -148,10 +152,13 @@ def wire_synced_crosshair(root, panes: list[dict], ns: str,
             div=(f'{p["pane"].id}.{p["div_attr"]}' if p.get("div_attr") else "null"),
             lb=json.dumps(p.get("label", "")), d=int(p.get("digits", 3)),
             ex=", ".join(
-                "{{n: {n}, s: {sj}.series, d: {dg}, e: {em}, g: {sg}}}".format(
+                "{{n: {n}, s: {sj}.series, d: {dg}, e: {em}, g: {sg},"
+                " f: {fj}, ft: {ft}}}".format(
                     n=json.dumps(e["name"]), sj=e["line"].id, dg=int(e.get("digits", 3)),
                     em=json.dumps(e.get("empty")) if e.get("empty") else "null",
-                    sg="true" if e.get("sign", True) else "false")
+                    sg="true" if e.get("sign", True) else "false",
+                    fj=(f'{e["flag_line"].id}.series' if e.get("flag_line") else "null"),
+                    ft=json.dumps(e.get("flag_text", "")))
                 for e in p.get("extras", ())
             ),
         )
@@ -253,7 +260,17 @@ def wire_synced_crosshair(root, panes: list[dict], ns: str,
                                             continue
                                         }
                                         const sign = (e.g && eb.value >= 0) ? '+' : ''
-                                        txt += '  ' + e.n + ' ' + sign + eb.value.toFixed(e.d)
+                                        // `flag` 给了就再查一条 series: 它在这个时刻
+                                        // 有值 -> 把 `flagText` 缀在读数后面。用来标
+                                        // 「这个读数当前不生效」这类状态。
+                                        let 尾 = ''
+                                        if (e.f) {
+                                            const fb = e.f.dataByIndex(j)
+                                            if (fb && fb.value !== undefined) 尾 = e.ft
+                                        }
+                                        // 缀在**标签**后面, 与 `_止损图例` 一致
+                                        txt += '  ' + e.n + 尾 + ' ' + sign
+                                               + eb.value.toFixed(e.d)
                                     }
                                 } else {
                                     txt += ': ' + v.toFixed(q.digits)

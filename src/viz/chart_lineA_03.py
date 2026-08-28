@@ -120,6 +120,7 @@ DIF颜色, DEA颜色 = "#42a5f5", "#ffa726"
 固定止损线色 = "#ff00d9"      # 与固定止损箭头同色
 点半径 = 1.5                  # 逐根圆点的半径, 见 `止损吊灯帧` 为什么不画折线
 吊灯线色 = "#39a626"          # 与吊灯箭头同色
+吊灯受阻色 = "#14521a"        # 深绿: 本根吊灯差于入场价, 被止盈阀门挡住
 
 TEXT, MUTED, BORDER = "#d1d4dc", "#8b93a7", "#2a2e39"
 选中底, 空闲底 = "#2196F3", "#1e222d"
@@ -141,6 +142,7 @@ class 瓦片:
     冷静带: Any = None
     固定止损线: Any = None
     吊灯线: Any = None
+    吊灯受阻线: Any = None
 
     @property
     def 所在页(self) -> tuple[int, ...]:
@@ -165,7 +167,7 @@ class 瓦片:
 
 
 # ------------------------------------------------------------- 建面板 ----
-def 建瓦片(root: Chart, 风险周期: str) -> dict[str, 瓦片]:
+def 建瓦片(root: Chart, 风险周期: str, 驱动周期: str) -> dict[str, 瓦片]:
     """
     六格 x 三层, **必须在 `root.show()` 之前**建好。六个格子一次全建出来, 靠
     `applyPanes()` 按当前页决定谁显示 —— 换页不重建任何图表对象 (重建会丢缩放状态)。
@@ -202,7 +204,11 @@ def 建瓦片(root: Chart, 风险周期: str) -> dict[str, 瓦片]:
             price_line=False, price_label=False)
         t.吊灯线 = 主.create_line(
             "吊灯", color=吊灯线色, width=1, price_line=False, price_label=False)
-        for 线 in (t.固定止损线, t.吊灯线):
+        # **建在吊灯之后** —— 两条点位完全重合, 后建的画在上面, 于是受阻的那些根
+        # 显示成深绿。吊灯那条保留全部值, 图例读它才不会在受阻时变成空。
+        t.吊灯受阻线 = 主.create_line(
+            "吊灯受阻", color=吊灯受阻色, width=1, price_line=False, price_label=False)
+        for 线 in (t.固定止损线, t.吊灯线, t.吊灯受阻线):
             主.run_script(
                 f"{线.id}.series.applyOptions({{lineVisible: false, "
                 f"pointMarkersVisible: true, pointMarkersRadius: {点半径}, "
@@ -211,12 +217,16 @@ def 建瓦片(root: Chart, 风险周期: str) -> dict[str, 瓦片]:
         # 留一行空白, 而这里要显示「未开仓」, 并且要跟着右上角开关一起显示/隐藏。
         drop_legend_row(主, t.固定止损线)
         drop_legend_row(主, t.吊灯线)
-        create_legend_div(主, 'stopLegend', font_size=11, font_family=UI_FONT_CJK)
-        主.run_script(
-            f"{主.id}.stopLegend.style.top = '';"
-            f"{主.id}.stopLegend.style.bottom = '30px';"
-            f"{主.id}.stopLegend.style.display = 'none'")
-        _止损图例(主, t.固定止损线, t.吊灯线)
+        drop_legend_row(主, t.吊灯受阻线)
+        # **止损图例只建在驱动格。** 别的格子根本没有止损线数据 (见 `该画止损线`),
+        # 建了也永远只显示「未开仓」—— 那不是信息, 是噪声。
+        if tf == 驱动周期:
+            create_legend_div(主, 'stopLegend', font_size=11, font_family=UI_FONT_CJK)
+            主.run_script(
+                f"{主.id}.stopLegend.style.top = '';"
+                f"{主.id}.stopLegend.style.bottom = '30px';"
+                f"{主.id}.stopLegend.style.display = 'none'")
+            _止损图例(主, t.固定止损线, t.吊灯线, t.吊灯受阻线)
 
         # 冷静期底色: 值恒 1.0 + 独立价格轴 + 零边距 -> 铺满整格高度。
         # 整段历史几百个区间用**一条**直方图, 不是几百个 vertical_span
@@ -306,7 +316,7 @@ def 建瓦片(root: Chart, 风险周期: str) -> dict[str, 瓦片]:
     return 出
 
 
-def _止损图例(pane, 固, 吊) -> None:
+def _止损图例(pane, 固, 吊, 阻) -> None:
     """
     主图**本格**悬停时的两行止损读数（鼠标就在这一格上）。
 
@@ -323,10 +333,15 @@ def _止损图例(pane, 固, 吊) -> None:
                 if (!p || p.time === undefined) {{ el.innerText = ''; return }}
                 const a = p.seriesData.get({固.id}.series)
                 const b = p.seriesData.get({吊.id}.series)
+                const c = p.seriesData.get({阻.id}.series)
                 const f = (x, n) => (x && x.value !== undefined)
                     ? x.value.toFixed(2) : {json.dumps("未开仓")}
+                // 受阻那条在这个时刻有值 -> 这一根的吊灯被止盈阀门挡住了
+                const 尾 = (c && c.value !== undefined) ? {json.dumps("（禁用）")} : ''
+                // 缀在**标签**后面而不是数值后面 —— 缀在最后会读成「这个价位被禁用」,
+                // 而实际含义是「吊灯这一条本根不生效」。
                 el.innerText = {json.dumps("固定止损")} + ': ' + f(a)
-                    + '    ' + {json.dumps("吊灯")} + ': ' + f(b)
+                    + '    ' + {json.dumps("吊灯")} + 尾 + ': ' + f(b)
             }}
             el.innerText = ''
             {pane.id}.chart.subscribeCrosshairMove(画)
@@ -364,17 +379,18 @@ def _macd图例(pane, 柱, dif, dea, 标签: str, attr: str, 位数: int = 3) ->
     }}""")
 
 
-def 注册瓦片(root: Chart, 瓦片们: dict[str, 瓦片]) -> None:
+def 注册瓦片(root: Chart, 瓦片们: dict[str, 瓦片], 驱动周期: str) -> None:
     """
     句柄挂到 `window.la3.tiles`。**必须在 `建骨架` 之后调** —— 脚本按调用顺序拼成
     一个 blob, `window.la3` 早于它存在才行。
     """
     条 = ", ".join(
         "{}: {{main: {}, atrPane: {}, macdPane: {}, mas: [{}], cd: {}, "
-        "stopLines: [{}, {}], stopLegend: {}.stopLegend, pos: {}}}".format(
+        "stopLines: [{}, {}, {}], stopLegend: {}, pos: {}}}".format(
             json.dumps(tf), t.main.id, t.atr面.id, t.macd面.id,
             ", ".join(str(l.id) for l in t.ma线.values()), t.冷静带.id,
-            t.固定止损线.id, t.吊灯线.id, t.main.id,
+            t.固定止损线.id, t.吊灯线.id, t.吊灯受阻线.id,
+            f"{t.main.id}.stopLegend" if tf == 驱动周期 else "null",
             # 每页一份 (top, left)。JSON 的键一律是字符串, JS 侧用 String(page) 查。
             json.dumps({str(页): [t.顶(页), t.左(页)] for 页 in t.所在页}),
         )
@@ -388,7 +404,7 @@ def 注册瓦片(root: Chart, 瓦片们: dict[str, 瓦片]) -> None:
     }}""")
 
 
-def 联动十字线(root: Chart, 瓦片们: dict[str, 瓦片]) -> None:
+def 联动十字线(root: Chart, 瓦片们: dict[str, 瓦片], 驱动周期: str) -> None:
     """
     四格主图 + 八个副图互相联动 —— **四周期对读正是这个窗口存在的理由**。
 
@@ -404,13 +420,20 @@ def 联动十字线(root: Chart, 瓦片们: dict[str, 瓦片]) -> None:
                     "legend": "native", "mas": list(t.ma线.values())})
         # 主图第二个图例块: 两条止损线的读数。空仓时显示「未开仓」(`empty`),
         # 价格不加 `+` 前缀 (`sign=False`)。与 `_止损图例` 的文案逐字一致。
-        面板.append({"pane": t.main, "series_js": f"{t.main.id}.series", "group": tf,
-                    "legend": "div", "div_attr": "stopLegend", "label": "",
-                    "extras": [
-                        {"name": "固定止损", "line": t.固定止损线, "digits": 2,
-                         "empty": "未开仓", "sign": False},
-                        {"name": "吊灯", "line": t.吊灯线, "digits": 2,
-                         "empty": "未开仓", "sign": False}]})
+        # **只有驱动格有这个图例**, 别的格子没有 stopLegend 这个 div。
+        # 注意这里用 if 包住而不是 `continue` —— 下面还有 ATR / MACD 两个条目要加。
+        if tf == 驱动周期:
+            面板.append({"pane": t.main, "series_js": f"{t.main.id}.series", "group": tf,
+                        "legend": "div", "div_attr": "stopLegend", "label": "",
+                        "extras": [
+                            {"name": "固定止损", "line": t.固定止损线, "digits": 2,
+                             "empty": "未开仓", "sign": False},
+                            {"name": "吊灯", "line": t.吊灯线, "digits": 2,
+                             "empty": "未开仓", "sign": False,
+                             # 受阻那条有值 -> 缀「（禁用）」在**标签**后面。两条路的
+                             # 文案必须逐字一致, 否则同一根 K 线在「悬停本格」和
+                             # 「悬停别格」时读数不同。
+                             "flag_line": t.吊灯受阻线, "flag_text": "（禁用）"}]})
         面板.append({"pane": t.atr面, "series_js": f"{t.atr线.id}.series", "group": tf,
                     "legend": "div", "div_attr": "atrLegend",
                     "label": f"{格标签[tf]} ATR", "digits": 3})
@@ -526,7 +549,7 @@ def 冷静期帧(结果: 回测结果, tfb: TFBars, 起箱: int,
 
 
 def 止损吊灯帧(结果: 回测结果, tfb: TFBars, 起箱: int,
-             基: TFBars) -> tuple[pd.DataFrame, pd.DataFrame]:
+             基: TFBars) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     两条**贯穿整笔**的线, 各自都从入场画到出场:
 
@@ -578,12 +601,12 @@ def 止损吊灯帧(结果: 回测结果, tfb: TFBars, 起箱: int,
     # 15m 内部这条线是常数, 因为引擎一根 15m 才动它一次。
     固全 = 结果.固定止损线[基.bin_of]
     吊全 = 结果.吊灯原线[基.bin_of]
+    阻全 = 结果.吊灯受阻[基.bin_of]
     n = len(固全)
     时 = np.asarray(to_ns(pd.Series(tfb.bars.index[起箱:])))
+    空帧 = lambda 名: pd.DataFrame({"time": 时, 名: np.full(len(时), np.nan)})
     if n == 0 or tfb.n_bars <= 起箱:
-        空 = np.full(len(时), np.nan)
-        return (pd.DataFrame({"time": 时, "固定止损": 空}),
-                pd.DataFrame({"time": 时, "吊灯": 空}))
+        return 空帧("固定止损"), 空帧("吊灯"), 空帧("吊灯受阻")
 
     固, 吊 = 固全, 吊全
     b = tfb.bin_of
@@ -598,8 +621,12 @@ def 止损吊灯帧(结果: 回测结果, tfb: TFBars, 起箱: int,
         出[有] = arr[末[有]]
         return 出
 
+    # 受阻那条只在被阀门挡住的根上有值 —— 它建在吊灯之后, 点重合、画在上面, 于是
+    # 那些根显示成深绿。吊灯那条保留**全部**值, 图例读它才不会在受阻时变成空。
+    阻 = np.where(阻全, 吊, np.nan)
     return (pd.DataFrame({"time": 时, "固定止损": 箱末(固)[起箱:]}),
-            pd.DataFrame({"time": 时, "吊灯": 箱末(吊)[起箱:]}))
+            pd.DataFrame({"time": 时, "吊灯": 箱末(吊)[起箱:]}),
+            pd.DataFrame({"time": 时, "吊灯受阻": 箱末(阻)[起箱:]}))
 
 
 # --------------------------------------------------------------- 标记 ----
@@ -660,6 +687,17 @@ def 标记(结果: 回测结果, tfb: TFBars, 起箱: int, 基: TFBars,
     return out
 
 
+def 该画止损线(名: str, 结果: 回测结果) -> bool:
+    """
+    **两条止损线只画在驱动周期那一格**(pill 上写的 `止损/吊灯线(1m)`)。
+
+    粗周期上每个箱只能留一个值 (`止损吊灯帧` 取箱末), 而一根 30m 里可能有两笔交易 ——
+    前一笔的平仓价位会被后一笔整个盖掉。那不是「粗糙」, 是**画错**: 图上看到的线与
+    引擎真正测试过的线对不上, 拿它核对策略会得出错误结论。索性不画。
+    """
+    return 名 == 结果.参数.驱动周期
+
+
 # --------------------------------------------------------------- 推送 ----
 def 推全部(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回测结果,
           参数) -> None:
@@ -678,9 +716,17 @@ def 推全部(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回�
         t.macd柱.set(h)
         # 冷静期 / 止损两条线的数据都一次性推好, 之后开关只改 visible —— 纯 JS 零往返
         t.冷静带.set(冷静期帧(结果, tfb, 起, 基))
-        固帧, 吊帧 = 止损吊灯帧(结果, tfb, 起, 基)
+        if 该画止损线(名, 结果):
+            固帧, 吊帧, 阻帧 = 止损吊灯帧(结果, tfb, 起, 基)
+        else:
+            空 = np.full(tfb.n_bars - 起, np.nan)
+            时 = np.asarray(to_ns(pd.Series(tfb.bars.index[起:])))
+            固帧 = pd.DataFrame({"time": 时, "固定止损": 空})
+            吊帧 = pd.DataFrame({"time": 时, "吊灯": 空})
+            阻帧 = pd.DataFrame({"time": 时, "吊灯受阻": 空})
         t.固定止损线.set(固帧)
         t.吊灯线.set(吊帧)
+        t.吊灯受阻线.set(阻帧)
         t.main.fit()
         t.atr面.fit()
         t.macd面.fit()
@@ -814,7 +860,9 @@ def 建骨架(chart: Chart) -> None:
                     for (const ln of t.stopLines)
                         ln.series.applyOptions({{visible: window.la3.止损线}})
                     // 图例跟着开关一起显示/隐藏 —— 关掉线却留着读数会误导
-                    t.stopLegend.style.display = window.la3.止损线 ? '' : 'none'
+                    // 只有驱动格有 stopLegend, 别的格子导出的是 null
+                    if (t.stopLegend)
+                        t.stopLegend.style.display = window.la3.止损线 ? '' : 'none'
                 }}
             }} catch (e) {{ console.log('la3.applyPanes', e) }}
         }}
@@ -952,7 +1000,7 @@ def 建标注开关(chart: Chart, handler: str) -> None:
         const bRev = mk({json.dumps("大周期反转")})
         const bCd = mk({json.dumps("冷静期")})
         const bLock = mk({json.dumps("入场双重条件")})
-        const bStop = mk({json.dumps("止损/吊灯线")})
+        const bStop = mk({json.dumps("止损/吊灯线(1m)")})
 
         const paint = () => {{
             const 表 = [[bStats, window.la3.stats], [bPb, window.la3.回调],
@@ -1021,7 +1069,7 @@ def show_lineA_03(
 
     瓦片们 = 建瓦片(chart := build_minute_chart(
         title="lineA-03 · 多周期回调（标注型测试窗口）", debug=debug),
-        缓存[default][3].风险周期)
+        缓存[default][3].风险周期, 缓存[default][3].驱动周期)
 
     def 画全部(sym: str | None = None) -> None:
         if sym:
@@ -1038,8 +1086,8 @@ def show_lineA_03(
     # 顺序有讲究: 建骨架 必须在任何东西碰 window.la3 之前
     build_ticker_search(chart, symbols, default, 画全部)
     建骨架(chart)
-    注册瓦片(chart, 瓦片们)
-    联动十字线(chart, 瓦片们)
+    注册瓦片(chart, 瓦片们, 缓存[default][3].驱动周期)
+    联动十字线(chart, 瓦片们, 缓存[default][3].驱动周期)
     handler = f"la3_notes_{chart.id.rsplit('.', 1)[-1]}"
     chart.win.handlers[handler] = 换标注
     建面板(chart)

@@ -20,6 +20,7 @@ from src.data.paths import CLEAN_DIR, CLEAN_DIR_HINT
 from src.data.v3_sessions import derive_segments, prepare
 from src.data.v3_timeframes import build_timeframes
 from src.engine.lineA_03_backtest import 出场理由, 吊灯, 止损, 计算周期, 跑回测
+from src.indicators import atr as atr_series
 from src.strategy.lineA_03 import 策略开关
 from src.strategy.pullback import gap_filled
 
@@ -157,13 +158,43 @@ def test_引擎只读驱动周期的价格(res, 钟):
             f"[{lo[j]}, {hi[j]}] 之外 @{t.出场时间}")
 
 
-def test_有效止损单调不降(res):
-    """
-    极值单调 + ATR₀ 冻结 => 吊灯线单调 => `max(固定止损, 吊灯线)` 单调。
+def _后退根数(res) -> int:
+    """有效止损朝不利方向移动了多少根 —— 单调性的度量。"""
+    坏 = 0
+    for t in res.交易:
+        段 = res.止损线[t.入场下标:t.出场下标 + 1]
+        段 = 段[~np.isnan(段)]
+        if len(段) < 2:
+            continue
+        d = np.diff(段)
+        坏 += int((d < -1e-9).sum() if t.方向 == "多" else (d > 1e-9).sum())
+    return 坏
 
-    **这是 v3 做不到的**: v3 的吊灯用实时 ATR, ATR 上升而极值不变时它会后退
-    (`tests/test_pullback_v3_backtest.py:106` 记着)。冻结 ATR 才买到这条性质。
+
+def test_ATR冻结时有效止损单调不降(prep, tf):
     """
+    极值单调 + ATR₀ 不变 => 吊灯线单调 => `max(固定止损, 吊灯线)` 单调。
+
+    **ATR 随动就拿不到这条性质** —— 见下一条。那是随动的代价, 是 2026-08-28 明确
+    接受的取舍, 不是 bug。
+    """
+    r = 跑回测(prep, tf, 开关=dataclasses.replace(策略开关(), 止盈_ATR随动=False))
+    assert _后退根数(r) == 0, "ATR 冻结时有效止损竟然后退了"
+
+
+def test_ATR随动真的会让追踪线后退(prep, tf):
+    """
+    空真守卫 + 代价的显式记录。随动必须**真的**破坏单调性, 否则上一条测试是在比较
+    两个等价的东西, `止盈_ATR随动` 这个开关也就没有存在的理由。
+    """
+    r = 跑回测(prep, tf, 开关=dataclasses.replace(策略开关(), 止盈_ATR随动=True))
+    assert _后退根数(r) > 0, "ATR 随动竟然没让线后退?"
+
+
+def test_有效止损单调不降_默认口径(res):
+    """默认口径下的同一条断言, 走 `res` 夹具, 与上面那两条互为交叉检查。"""
+    if res.开关.止盈_ATR随动:
+        pytest.skip("ATR 随动不保证单调, 见 test_ATR随动真的会让追踪线后退")
     for t in res.交易:
         段 = res.止损线[t.入场下标:t.出场下标 + 1]
         段 = 段[~np.isnan(段)]
@@ -208,6 +239,8 @@ def test_三条止损线满足取大取小的恒等式(res):
     期望 = 仓 | 出场根
     if res.开关.一根bar只做一个动作:
         期望 = 期望 & ~入场根
+    # 竞价根不出场 -> 出场块整块没跑 -> 三条线都不写。
+    期望 = 期望 & res.可成交
     assert np.array_equal(有, 期望), "止损线的有值区间 ≠ 持仓根 ∪ 出场根 − 入场根"
 
     多 = res.仓位 > 0
@@ -215,21 +248,34 @@ def test_三条止损线满足取大取小的恒等式(res):
         多[t.出场下标] = (t.方向 == "多")
     多有, 空有 = 有 & 多, 有 & ~多
     assert 多有.any() and 空有.any(), "多空两边没都出现 —— 这条测试是空真的"
-    assert np.allclose(有效[多有], np.maximum(固[多有], 吊[多有])), "多头不满足取大"
-    assert np.allclose(有效[空有], np.minimum(固[空有], 吊[空有])), "空头不满足取小"
+    # 止盈阀门开着时恒等式多一支: 受阻的根上有效止损**退回固定止损**, 不取大/取小。
+    阻 = res.吊灯受阻
+    多通, 空通 = 多有 & ~阻, 空有 & ~阻
+    assert np.allclose(有效[多通], np.maximum(固[多通], 吊[多通])), "多头不满足取大"
+    assert np.allclose(有效[空通], np.minimum(固[空通], 吊[空通])), "空头不满足取小"
+    if res.开关.止盈_不得差于入场价:
+        受 = 有 & 阻
+        assert 受.any(), "一根受阻的都没有 —— 阀门那一支没验到"
+        assert np.allclose(有效[受], 固[受]), "受阻的根上有效止损应当就是固定止损"
+    else:
+        assert not 阻.any(), "阀门关着却记了受阻"
 
     # 空真守卫: 必须真有「吊灯还压在固定止损更差一侧」的那一段, 否则 max/min 退化
     assert (吊[多有] < 固[多有]).any(), "多头从没出现吊灯低于固定止损 —— 入场那段没记下来"
     assert (吊[空有] > 固[空有]).any(), "空头从没出现吊灯高于固定止损"
 
 
-def _独立重算出场(t, res, 钟, 含本根: bool):
+def _独立重算出场(t, res, 钟, 含本根: bool, 险=None):
     """
     完全独立地把一笔的出场重算一遍, 不碰引擎的任何内部状态。
 
     `含本根=False` 是设计: 测试 bar i 时用的极值只折到 **i-1**。
     `含本根=True`  是那个经典错误: 先把 bar i 的 high/low 折进极值再测试。
     返回 (出场下标, 出场价, 理由) 或 None。
+
+    吊灯的 ATR 按 `开关.止盈_ATR随动` 取: 不随动就用反解出来的 ATR₀; 随动则每根重取
+    「截至本根、最后一根已收盘 30m」的 ATR(14) —— 与引擎同一个 `closed_pos`, 但这里
+    是独立算的一份。
     """
     p = res.参数
     多 = t.方向 == "多"
@@ -238,22 +284,48 @@ def _独立重算出场(t, res, 钟, 含本根: bool):
     lo = b["low"].to_numpy("float64")
     op = b["open"].to_numpy("float64")
     atr0 = abs(t.入场价 - t.固定止损位) / p.止损ATR倍数
+    可成交 = res.可成交
+    冻结 = not res.开关.止盈_ATR随动
+    if not 冻结:
+        ATR险 = np.asarray(atr_series(险.bars, p.ATR周期), dtype="float64")
+        c险 = 险.closed_pos.astype(np.int64)
+    def 折(极, j):
+        """竞价根不参与极值 —— 与引擎第 11 步同一个守卫。"""
+        if not 可成交[j]:
+            return 极
+        return max(极, hi[j]) if 多 else min(极, lo[j])
+
     极值 = t.入场价
     # `一根bar只做一个动作` 开着时, 本根开的仓本根不测出场 —— 起点是入场下标+1。
     起 = t.入场下标 + (1 if res.开关.一根bar只做一个动作 else 0)
+    if 起 > t.入场下标:
+        # **入场那一根的极值仍然要折进来。** 引擎里出场块的守卫是 `<`(本根不测出场),
+        # 而极值折入那一步的守卫是 `<=` —— 入场根不测出场, 但它的 high/low 照样进极值。
+        # 漏了这一折, 只有极少数笔会露馅 (实测 328 笔里 1 笔), 正好是这条测试的价值。
+        极值 = 折(极值, t.入场下标)
     for j in range(起, len(hi)):
         if 含本根:
-            极值 = max(极值, hi[j]) if 多 else min(极值, lo[j])
-        raw = (极值 - p.吊灯ATR倍数 * atr0) if 多 else (极值 + p.吊灯ATR倍数 * atr0)
-        线 = max(raw, t.固定止损位) if 多 else min(raw, t.固定止损位)
-        if (lo[j] <= 线) if 多 else (hi[j] >= 线):
-            return j, gap_filled(线, 多, op[j], True), (止损 if 线 == t.固定止损位 else 吊灯)
+            极值 = 折(极值, j)
+        if 冻结 or c险[j] < 0 or np.isnan(ATR险[c险[j]]):
+            吊atr = atr0
+        else:
+            吊atr = float(ATR险[c险[j]])
+        raw = (极值 - p.吊灯ATR倍数 * 吊atr) if 多 else (极值 + p.吊灯ATR倍数 * 吊atr)
+        if 可成交[j]:                     # 竞价根不出场
+            # 止盈阀门: 吊灯线差于入场价时本根不许用它出场, 退回固定止损。
+            受阻 = res.开关.止盈_不得差于入场价 and (
+                raw < t.入场价 if 多 else raw > t.入场价)
+            线 = t.固定止损位 if 受阻 else (
+                max(raw, t.固定止损位) if 多 else min(raw, t.固定止损位))
+            if (lo[j] <= 线) if 多 else (hi[j] >= 线):
+                return (j, gap_filled(线, 多, op[j], True),
+                        止损 if 线 == t.固定止损位 else 吊灯)
         if not 含本根:
-            极值 = max(极值, hi[j]) if 多 else min(极值, lo[j])
+            极值 = 折(极值, j)
     return None
 
 
-def test_吊灯的极值严格滞后一根_不含本根的high_low(res, 钟):
+def test_吊灯的极值严格滞后一根_不含本根的high_low(res, 钟, tf):
     """
     **截断法结构上抓不到这条。** 截断法把 bar i 之后的数据改成垃圾, 验的是「有没有读
     到未来的 bar」; 而这里的错误是「在同一根 bar 内部把顺序搞反了」—— 先用本根的
@@ -276,7 +348,7 @@ def test_吊灯的极值严格滞后一根_不含本根的high_low(res, 钟):
     # (实测最大相对差 2.1e-16, 一个 ULP)。这个容差比真实的错排差异小 15 个数量级 ——
     # 下面那个空真守卫会证明它确实分得开。
     坏 = [t for t in res.交易
-          if not 同(_独立重算出场(t, res, 钟, 含本根=False), t, 1e-9)]
+          if not 同(_独立重算出场(t, res, 钟, False, tf['30m']), t, 1e-9)]
     assert not 坏, (
         f"引擎与「极值截至 i-1」不一致: {len(坏)}/{len(res.交易)} 笔, "
         f"首个 @{坏[0].入场时间}")
@@ -284,10 +356,10 @@ def test_吊灯的极值严格滞后一根_不含本根的high_low(res, 钟):
     # 空真守卫: 两个版本必须**真的**能分出来, 否则上面那条断言什么都没验。
     # 而且要在**同一个容差**下分得开 —— 否则那条断言只是在验浮点噪声。
     分歧 = [t for t in res.交易
-            if not 同(_独立重算出场(t, res, 钟, 含本根=True), t, 1e-9)]
+            if not 同(_独立重算出场(t, res, 钟, True, tf['30m']), t, 1e-9)]
     assert 分歧, "含本根版与引擎完全一致 —— 这条测试是空真的, 夹具里没有能分辨的 bar"
-    差 = [abs(_独立重算出场(t, res, 钟, 含本根=True)[1] - t.出场价) for t in 分歧
-          if _独立重算出场(t, res, 钟, 含本根=True) is not None]
+    差 = [abs(_独立重算出场(t, res, 钟, True, tf['30m'])[1] - t.出场价) for t in 分歧
+          if _独立重算出场(t, res, 钟, True, tf['30m']) is not None]
     assert max(差) > 1e-3, f"两个版本只差 {max(差):.2e} —— 那不是错排, 是浮点噪声"
 
 

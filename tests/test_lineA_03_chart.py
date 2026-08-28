@@ -297,7 +297,7 @@ def test_建骨架排在任何东西碰window_la3之前(blob):
 
 def test_十一个pill都建了(blob):
     """中文标签是 json.dumps 写进脚本的 (ensure_ascii -> \\uXXXX), 要用同样的编码去找。"""
-    for 标 in ("统计", "回调", "大周期反转", "冷静期", "入场双重条件", "止损/吊灯线"):
+    for 标 in ("统计", "回调", "大周期反转", "冷静期", "入场双重条件", "止损/吊灯线(1m)"):
         assert json.dumps(标) in blob, 标
     for 标 in ("'MA'", "'ATR'", "'MACD'"):
         assert 标 in blob, 标
@@ -439,7 +439,10 @@ def test_十字线广播会跳过鼠标所在那一格(blob):
     # **主图占两条是刻意的**: 一条走库自带的 OHLC+MA 图例, 一条走我们自己的
     # `stopLegend` div。同一张图挂两次 `subscribeCrosshairMove` 是幂等的 (同一个值、
     # 同一个时刻、同一条 series), 而广播那边靠 `q.id === srcId` 把两条一起跳过。
-    assert len(ids) == len(C.周期集) * 4, f"面板数是 {len(ids)}, 期望 {len(C.周期集)*4}"
+    # 每格四条, 但 **stopLegend 那条只有驱动格有** —— 别的格子没有止损线数据,
+    # 建了图例也永远只显示「未开仓」, 是噪声不是信息。
+    期望 = len(C.周期集) * 4 - (len(C.周期集) - 1)
+    assert len(ids) == 期望, f"面板数是 {len(ids)}, 期望 {期望}"
 
 def test_python侧handler注册了(win):
     名 = [k for k in win.handlers if k.startswith("la3_notes_")]
@@ -653,7 +656,7 @@ def test_两条止损线的值都能在1m原始序列里找到出处(数据, 钟
     for 名 in C.周期集:
         tfb = tf[名]
         起 = C.起箱of(tfb, 结果, 钟)
-        固帧, 吊帧 = C.止损吊灯帧(结果, tfb, 起, 钟)
+        固帧, 吊帧, 阻帧 = C.止损吊灯帧(结果, tfb, 起, 钟)
         assert len(固帧) == len(吊帧) == tfb.n_bars - 起
         for 帧, 列 in ((固帧, "固定止损"), (吊帧, "吊灯")):
             v = 帧[列].to_numpy("float64")
@@ -682,7 +685,7 @@ def test_两条线同生同死_且吊灯从入场就画(数据, 钟):
     for 名 in C.周期集:
         tfb = tf[名]
         起 = C.起箱of(tfb, 结果, 钟)
-        固帧, 吊帧 = C.止损吊灯帧(结果, tfb, 起, 钟)
+        固帧, 吊帧, 阻帧 = C.止损吊灯帧(结果, tfb, 起, 钟)
         a = 固帧["固定止损"].to_numpy("float64")
         b = 吊帧["吊灯"].to_numpy("float64")
         assert np.array_equal(np.isnan(a), np.isnan(b)), f"{名} 两条线的有值区间不一致"
@@ -709,7 +712,7 @@ def test_空仓的箱两条线都留断口(数据, 钟):
     _, tf, 结果 = 数据
     tfb = 钟
     起 = C.起箱of(tfb, 结果, 钟)
-    固帧, _ = C.止损吊灯帧(结果, tfb, 起, 钟)
+    固帧, _, _ = C.止损吊灯帧(结果, tfb, 起, 钟)
     v = 固帧["固定止损"].to_numpy("float64")
     assert np.isnan(v).any(), "一个空仓的箱都没有 —— 这条测试是空真的"
     # 「该有线」的那些驱动 bar: 持仓区间去掉入场根 —— `一根bar只做一个动作` 开着时
@@ -719,10 +722,40 @@ def test_空仓的箱两条线都留断口(数据, 钟):
     for t in 结果.交易:
         起根 = t.入场下标 + (1 if 结果.开关.一根bar只做一个动作 else 0)
         有线[起根:t.出场下标 + 1] = True
+    有线 &= 结果.可成交          # 竞价根不出场 -> 出场块没跑 -> 没有线
     有线1m = 有线[钟.bin_of]
     for k in np.flatnonzero(np.isnan(v))[:400]:
         成员 = np.flatnonzero(tfb.bin_of == 起 + int(k))
         assert not 有线1m[成员].any(), f"bin {起 + int(k)} 有仓位却被留了断口"
+
+
+def test_止损线只画在驱动周期那一格(数据):
+    """
+    粗周期上每个箱只留一个值(箱末), 一根 30m 里有两笔交易时前一笔的平仓价位会被后一笔
+    盖掉 —— 那是画错不是粗糙, 拿它核对策略会得出错误结论。所以只画驱动格。
+    """
+    _, _, 结果 = 数据
+    该画 = [名 for 名 in C.周期集 if C.该画止损线(名, 结果)]
+    assert 该画 == [结果.参数.驱动周期], f"该画止损线的格子是 {该画}"
+    assert len(该画) == 1, "只能有一格画止损线"
+
+
+def test_吊灯受阻那条只在被阀门挡住的根上有值(数据, 钟):
+    """
+    受阻那条是**吊灯那条的子集**: 同样的值, 只在 `吊灯受阻` 为真的根上保留。它建在
+    吊灯之后、点位重合, 所以画在上面显示成深绿 —— 方便一眼看出哪些根的止盈被阀门挡了。
+    """
+    _, _, 结果 = 数据
+    起 = C.起箱of(钟, 结果, 钟)
+    _, 吊帧, 阻帧 = C.止损吊灯帧(结果, 钟, 起, 钟)
+    吊 = 吊帧["吊灯"].to_numpy("float64")
+    阻 = 阻帧["吊灯受阻"].to_numpy("float64")
+    有阻 = ~np.isnan(阻)
+    assert 有阻.any(), "一根受阻的都没有 —— 这条测试是空真的"
+    assert np.array_equal(阻[有阻], 吊[有阻]), "受阻那条的值必须与吊灯那条相同"
+    assert (~np.isnan(吊[有阻])).all(), "受阻的根上吊灯那条也必须有值(图例要读它)"
+    真阻 = 结果.吊灯受阻[起:]
+    assert np.array_equal(有阻, 真阻 & ~np.isnan(吊)), "受阻的根与引擎记的对不上"
 
 
 def test_止损线画成逐根圆点而不是折线(blob):
