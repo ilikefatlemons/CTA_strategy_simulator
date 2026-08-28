@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-lineA-03 的标注型测试窗口: **两页各四格** x 三层 (主图 / ATR / MACD)。
+lineA-03 的标注型测试窗口: **四格 x 三层** (主图 / ATR / MACD)。
 
-    页1 决策层   15m  30m        页2 执行层   1m   5m
-                 2h   1d                      15m  30m
+格子绑的是**位置**(左上/右上/左下/右下), 不是周期 —— 每格上方一个下拉框, 六个周期
+任选, **允许重复**(四格可以都选 1m)。默认 `左上 1m · 右上 15m · 左下 30m · 右下 2h`。
 
-六个周期, 但**瓦片只建六个不是八个** —— 15m/30m 两页都出现, 换页只挪位置, 不复制
-series。分两页而不是 3x2 一屏六格: 那样格高掉三分之一, 两个副图各只剩 ~61px。
+所以模型是「四个瓦片, 周期可变」而不是「六个瓦片, 位置可变」: 后者没法让同一个周期
+同时出现在两格。换周期只重推数据, **不重建图表对象**(重建会丢缩放状态)。
 
 这个窗口的用途是**对着 K 线核对策略的每一步**, 不是看收益。所以:
 
-  * 左上角一行: 两个页面 pill ｜ 三个指标开关 MA / ATR / MACD —— 纯 JS, 零 Python 往返
+  * 左上角一行: 四个周期下拉框 ｜ 三个指标开关 MA / ATR / MACD
   * 右上角六个标注开关: 统计 / 回调 / 大周期反转 / 冷静期 / 入场双重条件 / 止损·吊灯线
   * **默认全关, 图上只有 Entry / 出场两种箭头**
 
@@ -80,25 +80,18 @@ COL_W = 1.0 / COLS
 ATR_H = ROW_H * 0.20
 MACD_H = ROW_H * 0.20
 
-# 六个周期, **两页各四格**, 格子大小与三层结构一个字都不动。
+# **四个格位, 每个格位显示哪个周期由下拉框决定。**
 #
-# 为什么不做 3x2 一屏六格: 那样 ROW_H 掉到 0.305, 两个副图各只剩 ~61px (1000px 窗口),
-# 已经贴着可读下限; 主图从 274px 缩到 183px。分两页则格高完全不变。
+# 从「两页各四格」改过来 (2026-08-28)。旧模型是六个瓦片各绑一个周期、换页只挪位置;
+# 新模型是**四个瓦片绑格位**, 周期是可变状态。原因只有一个: 要允许**重复** ——
+# 左上和右上都选 15m 时需要两个同时可见的 15m 面板, 一个瓦片没法同时出现在两处。
 #
-# **15m / 30m 两页都出现**, 它们是两页的接缝 —— 决策层要看回调与风险尺, 执行层要看
-# 信号落到哪根。但**瓦片只建六个不是八个**: 15m/30m 各自只有一份 series, 换页只挪位置。
-# 复制成八格意味着多推一份 15m+30m 的全部数据, 十字线条目也从 24 涨到 32。
+# 代价: 换周期要走一次 Python 往返重推那一格的数据 (换 1m 要推 ~11.7 万根, 约 1 秒)。
+格位: tuple[str, ...] = ("左上", "右上", "左下", "右下")
+格坐标 = {"左上": (0, 0), "右上": (0, 1), "左下": (1, 0), "右下": (1, 1)}
+默认格位周期 = {"左上": "1m", "右上": "15m", "左下": "30m", "右下": "2h"}
+# 下拉框里可选的周期, 顺序就是下拉框里的顺序
 周期集: tuple[str, ...] = ("1m", "5m", "15m", "30m", "2h", "1d")
-页名 = {1: "决策层", 2: "执行层"}
-# {tf: {页号: (行, 列)}} —— 没有某页的键就是那一页不显示这一格
-GRID: dict[str, dict[int, tuple[int, int]]] = {
-    "15m": {1: (0, 0), 2: (1, 0)},
-    "30m": {1: (0, 1), 2: (1, 1)},
-    "2h":  {1: (1, 0)},
-    "1d":  {1: (1, 1)},
-    "1m":  {2: (0, 0)},
-    "5m":  {2: (0, 1)},
-}
 格标签 = {"1m": "1 分钟", "5m": "5 分钟", "15m": "15 分钟",
           "30m": "30 分钟", "2h": "2 小时", "1d": "日线"}
 
@@ -130,7 +123,8 @@ TEXT, MUTED, BORDER = "#d1d4dc", "#8b93a7", "#2a2e39"
 @dataclass
 class 瓦片:
     # 全是库的 AbstractChart / Line / Histogram, 没有公开的类型 stub
-    tf: str
+    格位: str                    # 固定: 左上 / 右上 / 左下 / 右下
+    tf: str                      # **可变**: 下拉框选的周期
     main: Any
     atr面: Any
     macd面: Any
@@ -145,39 +139,36 @@ class 瓦片:
     吊灯受阻线: Any = None
 
     @property
-    def 所在页(self) -> tuple[int, ...]:
-        return tuple(sorted(GRID[self.tf]))
-
-    def 顶(self, 页: int) -> float:
-        return TOP + GRID[self.tf][页][0] * ROW_H
-
-    def 左(self, 页: int) -> float:
-        return GRID[self.tf][页][1] * COL_W
-
-    # 建图时的初始落位 = 它最早出现的那一页。启动时 `applyPanes()` 会按当前页重排,
-    # 所以这里落在哪一页都不影响最终版面 —— 但必须落在**某一页的合法坐标**上,
-    # 否则第一帧会看到格子叠在一起。
-    @property
     def top(self) -> float:
-        return self.顶(self.所在页[0])
+        return TOP + 格坐标[self.格位][0] * ROW_H
 
     @property
     def left(self) -> float:
-        return self.左(self.所在页[0])
+        return 格坐标[self.格位][1] * COL_W
+
+    def atr标签(self, 风险周期: str) -> str:
+        标 = f"{格标签[self.tf]} ATR"
+        return 标 + "  ← 策略读这条" if self.tf == 风险周期 else 标
+
+    @property
+    def macd标签(self) -> str:
+        return f"{格标签[self.tf]} MACD"
 
 
 # ------------------------------------------------------------- 建面板 ----
-def 建瓦片(root: Chart, 风险周期: str, 驱动周期: str) -> dict[str, 瓦片]:
+def 建瓦片(root: Chart, 风险周期: str) -> dict[str, 瓦片]:
     """
-    六格 x 三层, **必须在 `root.show()` 之前**建好。六个格子一次全建出来, 靠
-    `applyPanes()` 按当前页决定谁显示 —— 换页不重建任何图表对象 (重建会丢缩放状态)。
+    四格 x 三层, **必须在 `root.show()` 之前**建好。
 
-    `风险周期` 那一格的 ATR 图例会标注「策略读这条」—— 其余各格的 ATR 只是陪看,
-    不标出来的话很容易以为每条都参与判定。
+    格子绑的是**位置**不是周期 —— 显示哪个周期由下拉框决定, 换周期只重推数据,
+    **不重建任何图表对象**(重建会丢缩放状态)。所以四个格子可以显示同一个周期。
+
+    ATR 图例上的「← 策略读这条」跟着 `风险周期` 走: 哪一格当前显示 30m, 哪一格标。
+    标签是**动态**的 (存在 `window.la3.tiles[格位].atrLabel`), 换周期时一起更新。
     """
     出: dict[str, 瓦片] = {}
-    for tf in 周期集:
-        t = 瓦片(tf=tf, main=None, atr面=None, macd面=None)
+    for 位 in 格位:
+        t = 瓦片(格位=位, tf=默认格位周期[位], main=None, atr面=None, macd面=None)
         主 = root.create_subchart(position="left", width=COL_W, height=ROW_H)
         主.time_scale(time_visible=True, seconds_visible=False, border_visible=True)
         主.crosshair(mode="normal")
@@ -218,15 +209,17 @@ def 建瓦片(root: Chart, 风险周期: str, 驱动周期: str) -> dict[str, �
         drop_legend_row(主, t.固定止损线)
         drop_legend_row(主, t.吊灯线)
         drop_legend_row(主, t.吊灯受阻线)
-        # **止损图例只建在驱动格。** 别的格子根本没有止损线数据 (见 `该画止损线`),
-        # 建了也永远只显示「未开仓」—— 那不是信息, 是噪声。
-        if tf == 驱动周期:
-            create_legend_div(主, 'stopLegend', font_size=11, font_family=UI_FONT_CJK)
-            主.run_script(
-                f"{主.id}.stopLegend.style.top = '';"
-                f"{主.id}.stopLegend.style.bottom = '30px';"
-                f"{主.id}.stopLegend.style.display = 'none'")
-            _止损图例(主, t.固定止损线, t.吊灯线, t.吊灯受阻线)
+        # 止损图例**四格都建**, 但只有当前显示驱动周期的那一格会显示 ——
+        # 靠 `applyPanes` 读 `hasStop` 控制。别的格子根本没有止损线数据
+        # (见 `该画止损线`), 显示出来只会一直是「未开仓」, 是噪声不是信息。
+        # 建在所有格子上是因为**格位与周期的绑定是可变的**: 下拉框一换, 哪一格该显示
+        # 就变了, 而图表对象不能重建 (会丢缩放状态)。
+        create_legend_div(主, 'stopLegend', font_size=11, font_family=UI_FONT_CJK)
+        主.run_script(
+            f"{主.id}.stopLegend.style.top = '';"
+            f"{主.id}.stopLegend.style.bottom = '30px';"
+            f"{主.id}.stopLegend.style.display = 'none'")
+        _止损图例(主, t.固定止损线, t.吊灯线, t.吊灯受阻线)
 
         # 冷静期底色: 值恒 1.0 + 独立价格轴 + 零边距 -> 铺满整格高度。
         # 整段历史几百个区间用**一条**直方图, 不是几百个 vertical_span
@@ -242,10 +235,7 @@ def 建瓦片(root: Chart, 风险周期: str, 驱动周期: str) -> dict[str, �
         t.atr线 = atr面.create_line("atr", color=ATR颜色, width=1,
                                     price_line=False, price_label=False)
         create_legend_div(atr面, "atrLegend", font_family=UI_FONT_CJK)
-        标 = f"{格标签[tf]} ATR"
-        if tf == 风险周期:
-            标 += "  ← 策略读这条"
-        wire_single_line_legend(atr面, t.atr线, 标, "atrLegend", digits=3)
+        _atr图例(atr面, t.atr线, 位, "atrLegend")
         t.atr面 = atr面
 
         macd面 = 主.create_subchart(position="left", width=COL_W, height=MACD_H, sync=False)
@@ -300,7 +290,7 @@ def 建瓦片(root: Chart, 风险周期: str, 驱动周期: str) -> dict[str, �
         # 面板叫 **MACD**, 三个值分开列 —— 不叫 DIF。面板上有三条东西
         # (DIF / DEA / 柱), 拿其中一条的名字当面板名会误导; 而在通达信一系的口径里
         # 「MACD」指的还是柱, 更容易读错。
-        _macd图例(macd面, t.macd柱, t.dif线, t.dea线, f"{格标签[tf]} MACD", "macdLegend")
+        _macd图例(macd面, t.macd柱, t.dif线, t.dea线, 位, "macdLegend")
         t.macd面 = macd面
 
         pin(主, t.top, t.left)
@@ -312,7 +302,7 @@ def 建瓦片(root: Chart, 风险周期: str, 驱动周期: str) -> dict[str, �
         # (`lwc_helpers.py:344-350`)。
         sync_timescale_only(主, atr面)
         sync_timescale_only(主, macd面)
-        出[tf] = t
+        出[位] = t
     return 出
 
 
@@ -349,7 +339,32 @@ def _止损图例(pane, 固, 吊, 阻) -> None:
     }}""")
 
 
-def _macd图例(pane, 柱, dif, dea, 标签: str, attr: str, 位数: int = 3) -> None:
+def _atr图例(pane, 线, 格位名: str, attr: str, 位数: int = 3) -> None:
+    """
+    ATR 面板**本格**悬停时的图例。标签是**动态**的 —— 换周期时 `换周期()` 改写
+    `window.la3.tiles[格位].atrLabel`, 这里每次渲染都重读。
+
+    不走 `lwc_helpers.wire_single_line_legend`: 那个把标签烤进 JS 常量, 换周期后会
+    停在旧周期上。
+    """
+    pane.run_script(f"""{{
+        try {{
+            const el = {pane.id}.{attr}
+            const 名 = () => ((window.la3 && window.la3.tiles[{json.dumps(格位名)}])
+                              || {{}}).atrLabel || ''
+            const 画 = (p) => {{
+                if (!p || p.time === undefined) {{ el.innerText = 名(); return }}
+                const a = p.seriesData.get({线.id}.series)
+                el.innerText = 名() + (a && a.value !== undefined
+                    ? ': ' + a.value.toFixed({位数}) : '')
+            }}
+            el.innerText = 名()
+            {pane.id}.chart.subscribeCrosshairMove(画)
+        }} catch (e) {{ console.log('atr legend:', e) }}
+    }}""")
+
+
+def _macd图例(pane, 柱, dif, dea, 格位名: str, attr: str, 位数: int = 3) -> None:
     """
     MACD 面板**本格**悬停时的图例（鼠标就在这一格上）。
 
@@ -361,40 +376,46 @@ def _macd图例(pane, 柱, dif, dea, 标签: str, attr: str, 位数: int = 3) ->
     pane.run_script(f"""{{
         try {{
             const el = {pane.id}.{attr}
-            const 名 = {json.dumps(标签)}
+            // 标签是**动态**的: 换周期时 `换周期()` 会改写它, 这里每次渲染都重读
+            const 名 = () => ((window.la3 && window.la3.tiles[{json.dumps(格位名)}])
+                              || {{}}).macdLabel || ''
             const 画 = (p) => {{
-                if (!p || p.time === undefined) {{ el.innerText = 名; return }}
+                if (!p || p.time === undefined) {{ el.innerText = 名(); return }}
                 const a = p.seriesData.get({dif.id}.series)
                 const b = p.seriesData.get({dea.id}.series)
                 const c = p.seriesData.get({柱.id}.series)
                 const f = (x) => (x >= 0 ? '+' : '') + x.toFixed({位数})
-                el.innerText = 名
+                el.innerText = 名()
                     + (a && a.value !== undefined ? '  DIF ' + f(a.value) : '')
                     + (b && b.value !== undefined ? '  DEA ' + f(b.value) : '')
                     + (c && c.value !== undefined ? '  柱 ' + f(c.value) : '')
             }}
-            el.innerText = 名
+            el.innerText = 名()
             {pane.id}.chart.subscribeCrosshairMove(画)
         }} catch (e) {{ console.log('macd legend:', e) }}
     }}""")
 
 
 def 注册瓦片(root: Chart, 瓦片们: dict[str, 瓦片], 驱动周期: str) -> None:
+    # `tf` / `atrLabel` / `macdLabel` 是**可变**的, 换周期时由 `换周期()` 改写。
     """
     句柄挂到 `window.la3.tiles`。**必须在 `建骨架` 之后调** —— 脚本按调用顺序拼成
     一个 blob, `window.la3` 早于它存在才行。
     """
     条 = ", ".join(
         "{}: {{main: {}, atrPane: {}, macdPane: {}, mas: [{}], cd: {}, "
-        "stopLines: [{}, {}, {}], stopLegend: {}, pos: {}}}".format(
-            json.dumps(tf), t.main.id, t.atr面.id, t.macd面.id,
+        "stopLines: [{}, {}, {}], stopLegend: {}, "
+        "tf: {}, atrLabel: {}, macdLabel: {}, hasStop: {}, "
+        "top: {}, left: {}}}".format(
+            json.dumps(t.格位), t.main.id, t.atr面.id, t.macd面.id,
             ", ".join(str(l.id) for l in t.ma线.values()), t.冷静带.id,
             t.固定止损线.id, t.吊灯线.id, t.吊灯受阻线.id,
-            f"{t.main.id}.stopLegend" if tf == 驱动周期 else "null",
-            # 每页一份 (top, left)。JSON 的键一律是字符串, JS 侧用 String(page) 查。
-            json.dumps({str(页): [t.顶(页), t.左(页)] for 页 in t.所在页}),
+            f"{t.main.id}.stopLegend",
+            json.dumps(t.tf), json.dumps(t.atr标签(驱动周期)),
+            json.dumps(t.macd标签), "true" if t.tf == 驱动周期 else "false",
+            t.top, t.left,
         )
-        for tf, t in 瓦片们.items()
+        for t in 瓦片们.values()
     )
     root.run_script(f"""{{
         try {{
@@ -415,39 +436,38 @@ def 联动十字线(root: Chart, 瓦片们: dict[str, 瓦片], 驱动周期: str
     `pane.series` —— 副图自动建的 K 线 series 是空的。
     """
     面板: list[dict] = []
-    for tf, t in 瓦片们.items():
-        面板.append({"pane": t.main, "series_js": f"{t.main.id}.series", "group": tf,
+    # **group 用格位不用周期** —— 两个格子可以显示同一个周期, 用周期当键会撞。
+    for 位, t in 瓦片们.items():
+        面板.append({"pane": t.main, "series_js": f"{t.main.id}.series", "group": 位,
                     "legend": "native", "mas": list(t.ma线.values())})
         # 主图第二个图例块: 两条止损线的读数。空仓时显示「未开仓」(`empty`),
         # 价格不加 `+` 前缀 (`sign=False`)。与 `_止损图例` 的文案逐字一致。
-        # **只有驱动格有这个图例**, 别的格子没有 stopLegend 这个 div。
-        # 注意这里用 if 包住而不是 `continue` —— 下面还有 ATR / MACD 两个条目要加。
-        if tf == 驱动周期:
-            面板.append({"pane": t.main, "series_js": f"{t.main.id}.series", "group": tf,
-                        "legend": "div", "div_attr": "stopLegend", "label": "",
-                        "extras": [
-                            {"name": "固定止损", "line": t.固定止损线, "digits": 2,
-                             "empty": "未开仓", "sign": False},
-                            {"name": "吊灯", "line": t.吊灯线, "digits": 2,
-                             "empty": "未开仓", "sign": False,
-                             # 受阻那条有值 -> 缀「（禁用）」在**标签**后面。两条路的
-                             # 文案必须逐字一致, 否则同一根 K 线在「悬停本格」和
-                             # 「悬停别格」时读数不同。
-                             "flag_line": t.吊灯受阻线, "flag_text": "（禁用）"}]})
-        面板.append({"pane": t.atr面, "series_js": f"{t.atr线.id}.series", "group": tf,
+        # 止损读数。四格都挂, 但只有当前显示驱动周期的那一格会显示 (`hasStop`)。
+        面板.append({"pane": t.main, "series_js": f"{t.main.id}.series", "group": 位,
+                    "legend": "div", "div_attr": "stopLegend", "label": "",
+                    "extras": [
+                        {"name": "固定止损", "line": t.固定止损线, "digits": 2,
+                         "empty": "未开仓", "sign": False},
+                        {"name": "吊灯", "line": t.吊灯线, "digits": 2,
+                         "empty": "未开仓", "sign": False,
+                         # 受阻那条有值 -> 缀「（禁用）」在**标签**后面。两条路的
+                         # 文案必须逐字一致, 否则同一根 K 线在「悬停本格」和
+                         # 「悬停别格」时读数不同。
+                         "flag_line": t.吊灯受阻线, "flag_text": "（禁用）"}]})
+        面板.append({"pane": t.atr面, "series_js": f"{t.atr线.id}.series", "group": 位,
                     "legend": "div", "div_attr": "atrLegend",
-                    "label": f"{格标签[tf]} ATR", "digits": 3})
+                    "label": "", "digits": 3})
         # extras: 面板叫 MACD, 但要同时报 DIF / DEA / 柱 三个读数。
         # 与 `_macd图例` 那条本格路径的文案保持一致。
-        面板.append({"pane": t.macd面, "series_js": f"{t.dif线.id}.series", "group": tf,
+        面板.append({"pane": t.macd面, "series_js": f"{t.dif线.id}.series", "group": 位,
                     "legend": "div", "div_attr": "macdLegend",
-                    "label": f"{格标签[tf]} MACD", "digits": 3,
+                    "label": "", "digits": 3,
                     "extras": [{"name": "DIF", "line": t.dif线, "digits": 3},
                                {"name": "DEA", "line": t.dea线, "digits": 3},
                                {"name": "柱", "line": t.macd柱, "digits": 3}]})
     wire_synced_crosshair(
         root, 面板, ns="window.la3",
-        snap_sources={tf: f"{t.main.id}.series" for tf, t in 瓦片们.items()},
+        snap_sources={位: f"{t.main.id}.series" for 位, t in 瓦片们.items()},
     )
 
 
@@ -687,7 +707,7 @@ def 标记(结果: 回测结果, tfb: TFBars, 起箱: int, 基: TFBars,
     return out
 
 
-def 该画止损线(名: str, 结果: 回测结果) -> bool:
+def 该画止损线(tf: str, 结果: 回测结果) -> bool:
     """
     **两条止损线只画在驱动周期那一格**(pill 上写的 `止损/吊灯线(1m)`)。
 
@@ -695,7 +715,7 @@ def 该画止损线(名: str, 结果: 回测结果) -> bool:
     前一笔的平仓价位会被后一笔整个盖掉。那不是「粗糙」, 是**画错**: 图上看到的线与
     引擎真正测试过的线对不上, 拿它核对策略会得出错误结论。索性不画。
     """
-    return 名 == 结果.参数.驱动周期
+    return tf == 结果.参数.驱动周期
 
 
 # --------------------------------------------------------------- 推送 ----
@@ -703,8 +723,9 @@ def 推全部(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回�
           参数) -> None:
     """全量重画。切品种时调。"""
     基 = tf[结果.参数.驱动周期]
-    for 名 in 周期集:
-        t, tfb = 瓦片们[名], tf[名]
+    for 位 in 格位:
+        t = 瓦片们[位]
+        tfb = tf[t.tf]
         起 = 起箱of(tfb, 结果, 基)
         t.main.set(K线帧(tfb, 起))
         for 期, 线 in t.ma线.items():
@@ -716,7 +737,7 @@ def 推全部(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回�
         t.macd柱.set(h)
         # 冷静期 / 止损两条线的数据都一次性推好, 之后开关只改 visible —— 纯 JS 零往返
         t.冷静带.set(冷静期帧(结果, tfb, 起, 基))
-        if 该画止损线(名, 结果):
+        if 该画止损线(t.tf, 结果):
             固帧, 吊帧, 阻帧 = 止损吊灯帧(结果, tfb, 起, 基)
         else:
             空 = np.full(tfb.n_bars - 起, np.nan)
@@ -730,8 +751,23 @@ def 推全部(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回�
         t.main.fit()
         t.atr面.fit()
         t.macd面.fit()
+    # JS 侧的镜像跟着更新 —— `注册瓦片` 只在建图时跑一次, 而格位绑的周期是可变的。
+    # 不更新的话: 图例标签停在旧周期、止损图例显示在错的格子上。
+    条 = ", ".join(
+        "{}: {{tf: {}, atrLabel: {}, macdLabel: {}, hasStop: {}}}".format(
+            json.dumps(位), json.dumps(t.tf),
+            json.dumps(t.atr标签(参数.风险周期)), json.dumps(t.macd标签),
+            "true" if 该画止损线(t.tf, 结果) else "false")
+        for 位, t in 瓦片们.items())
+    瓦片们[格位[0]].main.run_script(f"""{{
+        try {{
+            const 新 = {{{条}}}
+            for (const k in 新) Object.assign(window.la3.tiles[k], 新[k])
+            window.la3.applyPanes()
+        }} catch (e) {{ console.log('la3 tf sync:', e) }}
+    }}""")
     # 时间轴换过了 -> 作废十字线的 snap 缓存。必须排在四格 set() 之后。
-    invalidate_crosshair_snap(瓦片们[周期集[0]].main, "window.la3")
+    invalidate_crosshair_snap(瓦片们[格位[0]].main, "window.la3")
     推标记(瓦片们, tf, 结果)
 
 
@@ -745,8 +781,9 @@ def 推标记(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回�
     标记都被挪到更早的一根, 看起来就像用了未来数据。见 `set_markers_exact`。
     """
     基 = tf[结果.参数.驱动周期]
-    for 名 in 周期集:
-        t, tfb = 瓦片们[名], tf[名]
+    for 位 in 格位:
+        t = 瓦片们[位]
+        tfb = tf[t.tf]
         起 = 起箱of(tfb, 结果, 基)
         set_markers_exact(t.main, 标记(结果, tfb, 起, 基, 回调, 反转, 开关))
 
@@ -806,8 +843,8 @@ def 建骨架(chart: Chart) -> None:
             stats: true,                              // 右上角统计面板
             回调: false, 反转: false, 冷静: false, 开关: false,   // 标注, **默认全关**
             止损线: false,                            // 固定止损 + 吊灯 两条线
-            page: 1,                                  // 1 决策层 / 2 执行层
             range: null,                              // `_限可见区间` 算出来的可见窗口
+            // 四个格位当前显示哪个周期。**唯一真源在 Python**, 这里只是给 JS 读的镜像。
             tiles: {{}}, layout: {{}}, panel: null, boxes: [], searchBoxW: 0,
         }}
 
@@ -819,20 +856,10 @@ def 建骨架(chart: Chart) -> None:
                 const L = window.la3.layout
                 const mainH = L.rowH - (window.la3.atr ? L.atrH : 0)
                                      - (window.la3.macd ? L.macdH : 0)
-                const P = String(window.la3.page)
                 for (const k in window.la3.tiles) {{
                     const t = window.la3.tiles[k]
-                    const xy = t.pos[P]
-                    // 本页没有这一格 -> 整格三层一起藏起来。**必须连主图一起藏**,
-                    // 否则它还占着上一页的坑位, 和本页的格子叠在一起。
-                    if (!xy) {{
-                        t.main.wrapper.style.display = 'none'
-                        t.atrPane.wrapper.style.display = 'none'
-                        t.macdPane.wrapper.style.display = 'none'
-                        continue
-                    }}
-                    const x = xy[1] * 100
-                    let y = xy[0]
+                    const x = t.left * 100
+                    let y = t.top
                     t.main.wrapper.style.display = ''
                     t.main.wrapper.style.left = x + '%'
                     t.main.scale.height = mainH
@@ -860,24 +887,21 @@ def 建骨架(chart: Chart) -> None:
                     for (const ln of t.stopLines)
                         ln.series.applyOptions({{visible: window.la3.止损线}})
                     // 图例跟着开关一起显示/隐藏 —— 关掉线却留着读数会误导
-                    // 只有驱动格有 stopLegend, 别的格子导出的是 null
+                    // 图例只在「开关打开」且「这一格当前显示驱动周期」时显示
                     if (t.stopLegend)
-                        t.stopLegend.style.display = window.la3.止损线 ? '' : 'none'
+                        t.stopLegend.style.display =
+                            (window.la3.止损线 && t.hasStop) ? '' : 'none'
                 }}
             }} catch (e) {{ console.log('la3.applyPanes', e) }}
         }}
 
-        // 换页时把可见窗口补回去。**这一步不能省**: `_限可见区间` 是在建图那一批
-        // 脚本里对**所有**面板发的 setVisibleRange, 而当时非首页的格子是隐藏的、
-        // 盒子宽度为 0, 那次调用对它们是空转。不补的话切到第二页会看到全区间。
+        // 换周期后把可见窗口补回去 —— 新推的数据会让时间轴回到全区间。
         window.la3.applyRange = () => {{
             try {{
                 const r = window.la3.range
                 if (!r) return
-                const P = String(window.la3.page)
                 for (const k in window.la3.tiles) {{
                     const t = window.la3.tiles[k]
-                    if (!t.pos[P]) continue
                     for (const p of [t.main, t.atrPane, t.macdPane]) {{
                         try {{
                             p.chart.timeScale().setVisibleRange({{from: r.from, to: r.to}})
@@ -891,26 +915,31 @@ def 建骨架(chart: Chart) -> None:
     }}""")
 
 
-def 建顶栏开关(chart: Chart) -> None:
+def 建顶栏开关(chart: Chart, handler: str) -> None:
     """
-    左上角一整行 pill: `[决策层][执行层] ｜ [MA][ATR][MACD]`。
+    左上角一整行: `左上[▾] 右上[▾] 左下[▾] 右下[▾] ｜ [MA][ATR][MACD]`。
 
-    **页面开关和指标开关刻意共用一行、一个容器。** 另起一行要动 `TOP`, 而 `TOP` 和
-    pill 字号/内边距、以及下面四格的起始高度全都耦合着; 另开一个容器则要自己算横向
-    偏移 (得先量出这一行的宽度)。共用一行两样都不用碰。
+    四个下拉框各管一个格位, 每个都能选全部六个周期, **允许重复** —— 四格可以都选
+    同一个周期。选中即走一次 Python 往返重推那一格的数据 (`换周期`)。
 
-    **纯 JS, 零 Python 往返** —— 状态存 `window.la3.*`, `paint()` 重绘样式,
-    再调 `applyPanes()`。换页额外调一次 `applyRange()` 把可见窗口补给新露出来的格子。
+    **下拉框与指标开关刻意共用一行、一个容器。** 另起一行要动 `TOP`, 而 `TOP` 和
+    字号/内边距、以及下面四格的起始高度全都耦合着; 另开一个容器则要自己算横向偏移。
+    共用一行两样都不用碰。
 
-    照抄 `chart_rbreaker._build_lines_toggle` (:483-567)。`box` 是
-    `build_ticker_search` 在同一批脚本里声明的顶层 const —— 位置**实测取它的高度**
-    而不是写死, `chart_rbreaker.py:490-496` 记着这个坐标踩过一次高度相关的遮挡 bug。
+    指标开关仍是**纯 JS 零往返** (只改 `visible` 与三层堆叠); 下拉框必须往返, 因为
+    换周期要换整套数据。
 
-    **这个函数必须排在 `注册瓦片` 之后**: 它结尾要调一次 `applyPanes()` 把非当前页
-    的格子藏起来 —— Python 侧 `pin()` 只按「最早出现的那一页」落位, 不调这一下,
-    第一帧会看到 1m/5m 叠在 2h/1d 上面。
+    `box` 是 `build_ticker_search` 在同一批脚本里声明的顶层 const —— 位置**实测取它
+    的高度**而不是写死, `chart_rbreaker.py:490-496` 记着这个坐标踩过一次遮挡 bug。
+
+    **必须排在 `注册瓦片` 之后**: 结尾要调一次 `applyPanes()` 把三层堆叠摆好。
     """
-    页1标签, 页2标签 = json.dumps(f"1 {页名[1]}"), json.dumps(f"2 {页名[2]}")
+    选项 = "".join(
+        f"<option value='{tf}'>{格标签[tf]}</option>" for tf in 周期集)
+    # 注意这是 `%` 格式化不是 f-string —— 花括号**不要**写成 `{{}}`, `%` 不解转义。
+    盒 = ", ".join(
+        "{k: %s, d: %s}" % (json.dumps(位), json.dumps(默认格位周期[位]))
+        for 位 in 格位)
     chart.run_script(f"""{{
         const w = document.createElement('div')
         w.style.cssText = 'position:absolute;left:10px;z-index:4002;display:flex;'
@@ -919,19 +948,36 @@ def 建顶栏开关(chart: Chart) -> None:
         try {{ w.style.top = (box.getBoundingClientRect().height + 2) + 'px' }} catch (e) {{}}
         w.style.fontFamily = {json.dumps(UI_FONT_CJK)}
 
+        // 四个下拉框, 一格一个。允许重复 —— 四格可以都选同一个周期。
+        for (const g of [{盒}]) {{
+            const lab = document.createElement('span')
+            lab.innerText = g.k
+            lab.style.cssText = 'color:{MUTED};font-size:12px;pointer-events:none'
+            w.appendChild(lab)
+            const sel = document.createElement('select')
+            sel.innerHTML = {json.dumps(选项)}
+            sel.value = g.d
+            sel.style.cssText = 'cursor:pointer;pointer-events:auto;font-size:12px;'
+                + 'padding:3px 6px;border-radius:4px;background:{空闲底};'
+                + 'color:{TEXT};border:1px solid {BORDER};margin-right:4px'
+            sel.addEventListener('change', () => {{
+                window.callbackFunction(`{handler}_~_${{g.k}};;;${{sel.value}}`)
+            }})
+            w.appendChild(sel)
+        }}
+
+        const 隔 = document.createElement('div')
+        隔.style.cssText = 'width:1px;height:16px;background:{BORDER};margin:0 4px'
+        w.appendChild(隔)
+
         const mk = (label) => {{
             const e = document.createElement('div')
             e.innerText = label
-            // 外框是 pointer-events:none, 每个 pill 必须显式打开
             e.style.cssText = 'cursor:pointer;user-select:none;border-radius:4px;'
                 + 'pointer-events:auto;font-size:12px;padding:4px 12px'
             w.appendChild(e)
             return e
         }}
-        const b页1 = mk({页1标签}), b页2 = mk({页2标签})
-        const 隔 = document.createElement('div')
-        隔.style.cssText = 'width:1px;height:16px;background:{BORDER};margin:0 4px'
-        w.appendChild(隔)
         const bMa = mk('MA'), bAtr = mk('ATR'), bMacd = mk('MACD')
 
         const one = (el, on) => {{
@@ -940,8 +986,6 @@ def 建顶栏开关(chart: Chart) -> None:
             el.style.border = '1px solid ' + (on ? '{选中底}' : '{BORDER}')
         }}
         const paint = () => {{
-            // 页面是**单选**, 指标是各自独立的开关
-            one(b页1, window.la3.page === 1); one(b页2, window.la3.page === 2)
             one(bMa, window.la3.ma); one(bAtr, window.la3.atr); one(bMacd, window.la3.macd)
         }}
         const 切 = (键, el) => el.addEventListener('click', () => {{
@@ -951,18 +995,8 @@ def 建顶栏开关(chart: Chart) -> None:
         }})
         切('ma', bMa); 切('atr', bAtr); 切('macd', bMacd)
 
-        const 翻页 = (页, el) => el.addEventListener('click', () => {{
-            if (window.la3.page === 页) return
-            window.la3.page = 页
-            paint()
-            window.la3.applyPanes()
-            window.la3.applyRange()
-        }})
-        翻页(1, b页1); 翻页(2, b页2)
-
         paint()
         window.containerDiv.appendChild(w)
-        // 建图时 pin() 只按「最早出现的那一页」落位, 这一下把非当前页的格子藏掉
         window.la3.applyPanes()
     }}""")
 
@@ -1067,9 +1101,14 @@ def show_lineA_03(
             缓存[sym] = 加载(sym)
         return 缓存[sym]
 
-    瓦片们 = 建瓦片(chart := build_minute_chart(
-        title="lineA-03 · 多周期回调（标注型测试窗口）", debug=debug),
-        缓存[default][3].风险周期, 缓存[default][3].驱动周期)
+    chart = build_minute_chart(
+        title="lineA-03 · 多周期回调（标注型测试窗口）", debug=debug)
+    # **建骨架必须最先**: 从这一版起 `建瓦片` 里的 ATR / MACD 图例也要读
+    # `window.la3.tiles[...]` 取动态标签, 而那两段脚本在建瓦片时就执行一次
+    # (`el.innerText = 名()`)。la3 还不存在的话整段会被自己的 try/catch 吞掉,
+    # 图例的 subscribeCrosshairMove 就永远接不上 —— 静默失效, 最难查。
+    建骨架(chart)
+    瓦片们 = 建瓦片(chart, 缓存[default][3].风险周期)
 
     def 画全部(sym: str | None = None) -> None:
         if sym:
@@ -1083,15 +1122,25 @@ def show_lineA_03(
         tf, 结果, _, _ = 取(视图["symbol"])
         推标记(瓦片们, tf, 结果, 回调 == "1", 反转 == "1", 开关 == "1")
 
-    # 顺序有讲究: 建骨架 必须在任何东西碰 window.la3 之前
+    def 换周期(位: str, 新tf: str) -> None:
+        """下拉框选中 —— 换掉那一格的周期, 重推它的数据。**不重建图表对象。**"""
+        if 位 not in 瓦片们 or 新tf not in 周期集:
+            return
+        瓦片们[位].tf = 新tf
+        tf, 结果, 统, 参数 = 取(视图["symbol"])
+        推全部(瓦片们, tf, 结果, 参数)
+        _限可见区间(瓦片们, tf, 可见交易日)
+
+    # `建顶栏开关` 要读 build_ticker_search 声明的顶层 const `box` 量高度
     build_ticker_search(chart, symbols, default, 画全部)
-    建骨架(chart)
     注册瓦片(chart, 瓦片们, 缓存[default][3].驱动周期)
     联动十字线(chart, 瓦片们, 缓存[default][3].驱动周期)
     handler = f"la3_notes_{chart.id.rsplit('.', 1)[-1]}"
     chart.win.handlers[handler] = 换标注
     建面板(chart)
-    建顶栏开关(chart)
+    换周期handler = f"la3_tf_{chart.id.rsplit('.', 1)[-1]}"
+    chart.win.handlers[换周期handler] = 换周期
+    建顶栏开关(chart, 换周期handler)
     建标注开关(chart, handler)
 
     画全部(default)
@@ -1106,7 +1155,7 @@ def _限可见区间(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 交易
     try/catch, 而这批脚本拼成一个 blob 一次执行, 任何未捕获异常都会静默杀掉它之后
     的全部脚本。这里自己发一段等价的、包了 try 的。
     """
-    b = tf[周期集[0]].bars
+    b = tf[瓦片们[格位[0]].tf].bars
     天 = b["trading_date"].drop_duplicates()
     if len(天) <= 交易日:
         return
@@ -1123,8 +1172,7 @@ def _限可见区间(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 交易
                     {面.id}.chart.timeScale().setVisibleRange({{from: {f}, to: {t2}}})
                 }} catch (e) {{ console.log('la3 range:', e) }}
             }}""")
-    # 存一份给 `applyRange` —— 上面这一轮对**隐藏页**的格子是空转 (盒子宽度为 0),
-    # 换页时要拿这个值给刚露出来的格子补一次。
+    # 存一份给 `applyRange` —— 换周期后新推的数据会把时间轴弹回全区间, 要补一次。
     第一 = next(iter(瓦片们.values()))
     第一.main.run_script(
         f"{{ try {{ window.la3.range = {{from: {f}, to: {t2}}} }} catch (e) {{}} }}")

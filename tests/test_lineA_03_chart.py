@@ -204,31 +204,26 @@ def test_版面分数铺满屏幕():
     assert C.COLS * C.COL_W == pytest.approx(1.0)
     assert C.ATR_H + C.MACD_H < C.ROW_H, "两个副图占满了整行, 主图没地方了"
     assert 0 < C.TOP < 0.15
-    assert set(C.GRID) == set(C.周期集)
 
 
-def test_每一页都恰好铺满一个网格():
+def test_四个格位恰好铺满网格且不重叠():
     """
-    六个周期分两页, **每页必须恰好填满 ROWS x COLS 且不重叠** —— 少一格屏幕上留洞,
-    重一格两张图叠在一起 (换页只挪位置不重建, 叠上了就是永久的)。
+    格子绑的是**位置**不是周期。四个格位必须恰好填满 ROWS x COLS —— 少一格屏幕留洞,
+    重一格两张图永久叠在一起 (换周期只重推数据, 不重建图表对象)。
     """
     满 = {(r, c) for r in range(C.ROWS) for c in range(C.COLS)}
-    每页: dict = {}
-    for tf, 页表 in C.GRID.items():
-        assert 页表, f"{tf} 一页都不在, 那它为什么还在周期集里"
-        for 页, rc in 页表.items():
-            每页.setdefault(页, []).append((tf, rc))
-    assert set(每页) == set(C.页名), f"页号与页名对不上: {set(每页)} vs {set(C.页名)}"
-    for 页, 项 in 每页.items():
-        坐标 = [rc for _, rc in 项]
-        assert len(坐标) == len(满), f"页{页} 有 {len(坐标)} 格, 期望 {len(满)}"
-        assert set(坐标) == 满, f"页{页} 的坐标不铺满: {sorted(坐标)}"
-        assert len(set(坐标)) == len(坐标), f"页{页} 有两格叠在同一个坑位: {sorted(项)}"
+    assert set(C.格坐标) == set(C.格位), "格坐标与格位对不上"
+    坐标 = [C.格坐标[位] for 位 in C.格位]
+    assert len(坐标) == len(满) == len(C.格位)
+    assert set(坐标) == 满, f"格位坐标不铺满: {sorted(坐标)}"
+    assert len(set(坐标)) == len(坐标), "有两个格位落在同一个坑位"
 
 
-def test_每个周期至少出现在一页上():
-    for tf in C.周期集:
-        assert C.GRID.get(tf), f"{tf} 建了瓦片却没有任何一页显示它"
+def test_默认周期合法且四格可重复():
+    assert set(C.默认格位周期) == set(C.格位), "默认周期没给全每个格位"
+    for 位, tf in C.默认格位周期.items():
+        assert tf in C.周期集, f"{位} 的默认周期 {tf} 不在下拉框里"
+    # 允许重复是这套模型的目的, 所以**不许**断言四格互不相同
 
 
 def test_面板html带着三条声明(数据, 钟):
@@ -295,48 +290,44 @@ def test_建骨架排在任何东西碰window_la3之前(blob):
     assert 建 >= 0 and 建 == 首, f"有脚本早于 建骨架 就碰了 window.la3: {blob[首:首+160]!r}"
 
 
-def test_十一个pill都建了(blob):
+def test_pill与下拉框都建了(blob):
     """中文标签是 json.dumps 写进脚本的 (ensure_ascii -> \\uXXXX), 要用同样的编码去找。"""
     for 标 in ("统计", "回调", "大周期反转", "冷静期", "入场双重条件", "止损/吊灯线(1m)"):
         assert json.dumps(标) in blob, 标
     for 标 in ("'MA'", "'ATR'", "'MACD'"):
         assert 标 in blob, 标
-    for 页, 名 in C.页名.items():
-        assert json.dumps(f"{页} {名}") in blob, f"页面 pill 少了 {页} {名}"
+    for 位 in C.格位:
+        assert json.dumps(位) in blob, f"下拉框少了格位 {位}"
+    for tf in C.周期集:
+        assert f"<option value='{tf}'>" in blob, f"下拉框选项少了 {tf}"
 
 
-def test_换页的接线都在(blob):
+def test_换周期的接线都在(blob):
     """
-    换页只挪位置、不重建图表对象 (重建会丢缩放状态)。四件事缺一不可:
+    换周期只重推数据、**不重建图表对象**(重建会丢缩放状态)。四件事缺一不可:
 
-      1. `page` 默认在第一页
-      2. 每个瓦片带 `pos` (每页一份 top/left), `applyPanes` 按当前页查它
-      3. 本页没有的格子**三层一起藏**, 否则它还占着上一页的坑位
-      4. `applyRange` 存在 —— 建图时非首页的格子盒子宽度为 0, `_限可见区间` 那一轮
-         对它们是空转, 不补发就会看到全区间
+      1. 四个下拉框各带一次 Python 往返 —— 换周期要换整套数据, 纯 JS 做不到
+      2. 瓦片带 tf / atrLabel / macdLabel / hasStop, 且这些是**可变**的
+      3. 图例标签在渲染时**重读** window.la3, 不是烤进 JS 常量 —— 否则换周期后
+         标签会停在旧周期上
+      4. applyRange 存在 —— 新推的数据会把时间轴弹回全区间, 要补一次
     """
-    assert "page: 1," in blob, "window.la3 里没有 page 默认值"
-    assert "pos:" in blob, "瓦片没有导出每页坐标"
-    assert "const P = String(window.la3.page)" in blob, "applyPanes 没有按页取坐标"
-    assert "const xy = t.pos[P]" in blob
-    assert "if (!xy)" in blob, "没有「本页没有这一格」的分支"
-    assert "window.la3.applyRange" in blob, "少了换页后补发可见区间"
-    assert "window.la3.range" in blob, "可见区间没有存下来给换页用"
-    # 藏的时候主图必须一起藏, 只藏两个副图会让主图留在上一页的坑位上
-    藏 = blob.split("if (!xy)")[1][:400]
-    for 名 in ("t.main.wrapper.style.display = 'none'",
-               "t.atrPane.wrapper.style.display = 'none'",
-               "t.macdPane.wrapper.style.display = 'none'"):
-        assert 名 in 藏, f"隐藏分支里少了 {名}"
+    assert blob.count("addEventListener('change'") >= 1, "下拉框没接 change"
+    assert "callbackFunction" in blob
+    for 键 in ("tf:", "atrLabel:", "macdLabel:", "hasStop:"):
+        assert 键 in blob, f"瓦片没导出 {键}"
+    assert ".atrLabel || ''" in blob, "ATR 图例的标签不是运行时重读的"
+    assert ".macdLabel || ''" in blob, "MACD 图例的标签不是运行时重读的"
+    assert "window.la3.applyRange" in blob
+    # 止损图例四格都建, 靠 hasStop 决定谁显示
+    assert "window.la3.止损线 && t.hasStop" in blob, "止损图例没按 hasStop 过滤"
 
 
-def test_换页会重排横向位置(blob):
-    """
-    `left` 必须在 JS 侧被改写。原来版面是死的, `left` 只由 Python 的 `pin()` 写一次;
-    15m/30m 两页的**列不同**, 不在 JS 里改 left 就会错位。
-    """
-    assert "wrapper.style.left = x + '%'" in blob, "applyPanes 没有改写 left"
-    assert blob.count("wrapper.style.left = x + '%'") >= 3, "三层都要改 left"
+def test_格位坐标是从Python写死进JS的(blob):
+    """四格位置固定不变, JS 侧只读不算 —— 位置的真源在 Python 的 `格坐标`。"""
+    assert "top:" in blob and "left:" in blob
+    assert "wrapper.style.left = x + '%'" in blob
+    assert blob.count("wrapper.style.left = x + '%'") >= 3, "三层都要摆 left"
 
 
 def test_三层版面的重排逻辑在(blob):
@@ -363,9 +354,9 @@ def test_三层的时间轴是同步的(blob):
     主图之间十字线消失 (`lwc_helpers.py:344-350`)。
     """
     n = blob.count("subscribeVisibleLogicalRangeChange")
-    # 每格两对 (主↔ATR, 主↔MACD), 每对双向 = 4 次订阅。
-    # **六格不是八格** —— 15m/30m 两页共用同一个瓦片, 换页只挪位置。
-    期望 = len(C.周期集) * 2 * 2
+    # 每格两对 (主↔ATR, 主↔MACD), 每对双向 = 4 次订阅。**四个格位**, 与能选的周期
+    # 数无关 —— 格子绑位置不绑周期。
+    期望 = len(C.格位) * 2 * 2
     assert n == 期望, f"时间轴同步的订阅数是 {n}, 期望 {期望}"
     assert "rangeSyncing" in blob, "少了重入守卫, 两张图会互相触发到爆栈"
 
@@ -375,7 +366,8 @@ def test_MACD面板不叫DIF(blob):
     面板上有三条东西 (DIF / DEA / 柱), 拿其中一条的名字当面板名会误导; 而在通达信
     一系的口径里「MACD」指的还是柱, 更容易读错。所以面板叫 MACD, 三个值分开列。
     """
-    for 格 in C.格标签.values():
+    # 图例标签是**动态**的, blob 里只会出现四个默认周期的那几个
+    for 格 in [C.格标签[C.默认格位周期[位]] for 位 in C.格位]:
         assert json.dumps(f"{格} MACD") in blob, f"{格} 的 MACD 面板没有叫 MACD"
         assert json.dumps(f"{格} DIF") not in blob, f"{格} 的面板还标着 DIF"
     # 三个读数都在
@@ -396,7 +388,7 @@ def test_MACD三条series都在可见的right轴上(blob):
 
     这条同时钉住「一起缩放」和「纵轴还在、能拖」两件事。
     """
-    n = len(C.周期集)
+    n = len(C.格位)
     # 每格一个柱, 每个柱后面都跟一句迁轴
     assert blob.count('"柱"') >= n
     assert blob.count("priceScaleId: 'right'") == n, "柱没被迁到 right 轴, 或次数不对"
@@ -439,9 +431,9 @@ def test_十字线广播会跳过鼠标所在那一格(blob):
     # **主图占两条是刻意的**: 一条走库自带的 OHLC+MA 图例, 一条走我们自己的
     # `stopLegend` div。同一张图挂两次 `subscribeCrosshairMove` 是幂等的 (同一个值、
     # 同一个时刻、同一条 series), 而广播那边靠 `q.id === srcId` 把两条一起跳过。
-    # 每格四条, 但 **stopLegend 那条只有驱动格有** —— 别的格子没有止损线数据,
-    # 建了图例也永远只显示「未开仓」, 是噪声不是信息。
-    期望 = len(C.周期集) * 4 - (len(C.周期集) - 1)
+    # 每格四条: 主图原生图例 / 主图止损读数 / ATR / MACD。**止损那条四格都挂**,
+    # 但只有当前显示驱动周期的那一格会显示 (applyPanes 读 hasStop)。
+    期望 = len(C.格位) * 4
     assert len(ids) == 期望, f"面板数是 {len(ids)}, 期望 {期望}"
 
 def test_python侧handler注册了(win):
@@ -778,8 +770,8 @@ def test_止损线默认关掉且开关联动图例(blob):
     assert "止损线: false" in blob, "止损线默认必须是关的"
     assert "stopLines" in blob, "两条线没挂进 window.la3.tiles"
     assert "visible: window.la3.止损线" in blob, "开关没接到 series 可见性上"
-    assert "stopLegend.style.display = window.la3.止损线" in blob, (
-        "图例块没跟着开关显示/隐藏")
+    assert "window.la3.止损线 && t.hasStop" in blob, (
+        "图例块没跟着开关显示/隐藏, 或没按 hasStop 只留在显示驱动周期的那一格")
 
 
 def test_空仓时图例显示未开仓而不是留空(blob):
