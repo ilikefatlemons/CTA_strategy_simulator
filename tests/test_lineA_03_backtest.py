@@ -309,19 +309,19 @@ def test_吊灯出场里有亏损的_而且这不是bug(res):
 def test_三步走的时序在每一笔上都成立(res):
     """
     手工验收清单第 4、5 条的机械版: 每个 Entry 之前都必须能找到
-    **回调闩锁点 → 锁1解锁点 / 锁2解锁点**, 且回调不晚于两个锁。
+    **回调闩锁点 → 开关1点 / 开关2点**, 且回调不晚于两个锁。
 
     这条把「三步走」从一句描述变成一个可证伪的断言 —— 哪天级联被改错了顺序
     (比如先看锁再认回调), 这里立刻红。
     """
-    l1 = np.array([p["下标"] for p in res.锁1解锁点])
-    l2 = np.array([p["下标"] for p in res.锁2解锁点])
+    l1 = np.array([p["下标"] for p in res.开关1点])
+    l2 = np.array([p["下标"] for p in res.开关2点])
     pb = np.array([p["下标"] for p in res.回调闩锁点])
     assert l1.size and l2.size and pb.size
     for t in res.交易:
         前1, 前2, 前回 = l1[l1 <= t.入场下标], l2[l2 <= t.入场下标], pb[pb <= t.入场下标]
-        assert 前1.size, f"入场 @{t.入场时间} 之前没有锁1解锁点"
-        assert 前2.size, f"入场 @{t.入场时间} 之前没有锁2解锁点"
+        assert 前1.size, f"入场 @{t.入场时间} 之前没有开关1点"
+        assert 前2.size, f"入场 @{t.入场时间} 之前没有开关2点"
         assert 前回.size, f"入场 @{t.入场时间} 之前没有回调闩锁点"
         assert 前回.max() <= 前1.max() and 前回.max() <= 前2.max(), (
             f"入场 @{t.入场时间} 的回调晚于锁 —— 三步走的顺序被破坏了")
@@ -389,10 +389,10 @@ def test_观测记录都不参与决策(res):
     四类标注点是**仅观测**的。把它们清空重跑, 交易必须逐字节相同 —— 这条抓的是
     「不小心让图层的记录反过来影响了判定」。
     """
-    assert res.回调闩锁点 and res.大周期翻转点 and res.锁1解锁点 and res.锁2解锁点
+    assert res.回调闩锁点 and res.大周期翻转点 and res.开关1点 and res.开关2点
     # 结构上它们只被 append, 从不被读; 这里断言下标都落在合法范围里
     n = len(res.仓位)
-    for 列 in (res.回调闩锁点, res.大周期翻转点, res.锁1解锁点, res.锁2解锁点):
+    for 列 in (res.回调闩锁点, res.大周期翻转点, res.开关1点, res.开关2点):
         assert all(0 <= d["下标"] < n for d in 列)
         assert all(d["方向"] in (1, -1) for d in 列)
 

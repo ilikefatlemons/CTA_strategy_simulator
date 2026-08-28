@@ -114,8 +114,8 @@ DIF颜色, DEA颜色 = "#42a5f5", "#ffa726"
 吊灯亏色 = "#ffa726"
 回调色 = "#fdd835"
 反转色 = "#ab47bc"
-锁1色 = "#ff7043"
-锁2色 = "#29b6f6"
+开关1色 = "#ff7043"
+开关2色 = "#29b6f6"
 冷静色 = "rgba(239, 83, 80, 0.13)"
 固定止损线色 = "#ff00d9"      # 与固定止损箭头同色
 点半径 = 1.5                  # 逐根圆点的半径, 见 `止损吊灯帧` 为什么不画折线
@@ -604,7 +604,7 @@ def 止损吊灯帧(结果: 回测结果, tfb: TFBars, 起箱: int,
 
 # --------------------------------------------------------------- 标记 ----
 def 标记(结果: 回测结果, tfb: TFBars, 起箱: int, 基: TFBars,
-        回调: bool = False, 反转: bool = False, 锁: bool = False) -> list[dict]:
+        回调: bool = False, 反转: bool = False, 开关: bool = False) -> list[dict]:
     """
     **15m 下标** -> 1m 下标 -> 所属合成 K 线的末端标签。所以同一个标记会在四张图上
     各自落到对应的那根 —— 这正是四周期对读要的效果。
@@ -650,11 +650,11 @@ def 标记(结果: 回测结果, tfb: TFBars, 起箱: int, 基: TFBars,
         for p in 结果.大周期翻转点:
             加(p["下标"], position="inside", shape="square", color=反转色,
                text="大周期转" + ("多" if p["方向"] == 1 else "空"))
-    if 锁:
-        for p in 结果.锁1解锁点:
-            加(p["下标"], position="inside", shape="circle", color=锁1色, text="锁1")
-        for p in 结果.锁2解锁点:
-            加(p["下标"], position="inside", shape="circle", color=锁2色, text="锁2")
+    if 开关:
+        for p in 结果.开关1点:
+            加(p["下标"], position="inside", shape="circle", color=开关1色, text="开关1")
+        for p in 结果.开关2点:
+            加(p["下标"], position="inside", shape="circle", color=开关2色, text="开关2")
 
     out.sort(key=lambda m: m["time"])
     return out
@@ -690,7 +690,7 @@ def 推全部(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回�
 
 
 def 推标记(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回测结果,
-         回调: bool = False, 反转: bool = False, 锁: bool = False) -> None:
+         回调: bool = False, 反转: bool = False, 开关: bool = False) -> None:
     """
     只换 markers —— 不动 K 线, 因此不重置缩放。切标注开关时调。
 
@@ -702,7 +702,7 @@ def 推标记(瓦片们: dict[str, 瓦片], tf: dict[str, TFBars], 结果: 回�
     for 名 in 周期集:
         t, tfb = 瓦片们[名], tf[名]
         起 = 起箱of(tfb, 结果, 基)
-        set_markers_exact(t.main, 标记(结果, tfb, 起, 基, 回调, 反转, 锁))
+        set_markers_exact(t.main, 标记(结果, tfb, 起, 基, 回调, 反转, 开关))
 
 
 # --------------------------------------------------------------- 面板 ----
@@ -758,7 +758,7 @@ def 建骨架(chart: Chart) -> None:
         window.la3 = {{
             ma: true, atr: true, macd: true,          // 左上角三个指标开关
             stats: true,                              // 右上角统计面板
-            回调: false, 反转: false, 冷静: false, 锁: false,   // 标注, **默认全关**
+            回调: false, 反转: false, 冷静: false, 开关: false,   // 标注, **默认全关**
             止损线: false,                            // 固定止损 + 吊灯 两条线
             page: 1,                                  // 1 决策层 / 2 执行层
             range: null,                              // `_限可见区间` 算出来的可见窗口
@@ -957,7 +957,7 @@ def 建标注开关(chart: Chart, handler: str) -> None:
         const paint = () => {{
             const 表 = [[bStats, window.la3.stats], [bPb, window.la3.回调],
                         [bRev, window.la3.反转], [bCd, window.la3.冷静],
-                        [bLock, window.la3.锁], [bStop, window.la3.止损线]]
+                        [bLock, window.la3.开关], [bStop, window.la3.止损线]]
             for (const [e, on] of 表) {{
                 e.style.background = on ? '{选中底}' : '{空闲底}'
                 e.style.color = on ? '#ffffff' : '{TEXT}'
@@ -966,7 +966,7 @@ def 建标注开关(chart: Chart, handler: str) -> None:
         }}
         const 推标注 = () => window.callbackFunction(
             `{handler}_~_${{window.la3.回调 ? 1 : 0}};;;`
-            + `${{window.la3.反转 ? 1 : 0}};;;${{window.la3.锁 ? 1 : 0}}`)
+            + `${{window.la3.反转 ? 1 : 0}};;;${{window.la3.开关 ? 1 : 0}}`)
 
         bStats.addEventListener('click', () => {{
             window.la3.stats = !window.la3.stats
@@ -983,7 +983,7 @@ def 建标注开关(chart: Chart, handler: str) -> None:
                 window.la3.applyPanes()
             }})
         }}
-        for (const [键, el] of [['回调', bPb], ['反转', bRev], ['锁', bLock]]) {{
+        for (const [键, el] of [['回调', bPb], ['反转', bRev], ['开关', bLock]]) {{
             el.addEventListener('click', () => {{
                 window.la3[键] = !window.la3[键]
                 paint()
@@ -1031,9 +1031,9 @@ def show_lineA_03(
         推面板(chart, 面板html(统))
         _限可见区间(瓦片们, tf, 可见交易日)
 
-    def 换标注(回调: str, 反转: str, 锁: str) -> None:
+    def 换标注(回调: str, 反转: str, 开关: str) -> None:
         tf, 结果, _, _ = 取(视图["symbol"])
-        推标记(瓦片们, tf, 结果, 回调 == "1", 反转 == "1", 锁 == "1")
+        推标记(瓦片们, tf, 结果, 回调 == "1", 反转 == "1", 开关 == "1")
 
     # 顺序有讲究: 建骨架 必须在任何东西碰 window.la3 之前
     build_ticker_search(chart, symbols, default, 画全部)

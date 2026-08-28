@@ -15,7 +15,7 @@ import pytest
 from src.indicators import macd as 参考macd
 from src.strategy.lineA_03 import (
     多, 空, 未定, 三线状态, 吊灯线, 固定止损, 大周期状态, 完全反向,
-    macd线, 粘住, 策略参数, 金叉死叉, 锁2_水位金叉运行,
+    macd线, 粘住, 策略参数, 金叉死叉, 动量开关,
 )
 
 
@@ -93,7 +93,7 @@ def test_完全反向要求排列干净():
 
 
 # ------------------------------------------------------------- 锁 2 ----
-def test_锁2的两层暖机守卫(收盘):
+def test_开关2的两层暖机守卫(收盘):
     """
     第一层: 守卫之内不输出锁。
     第二层: 守卫之内**不累积状态** —— 少了这一层, 一次发生在 MACD 垃圾区里的金叉
@@ -101,10 +101,10 @@ def test_锁2的两层暖机守卫(收盘):
     """
     dif, dea = macd线(收盘)
     for 守卫 in (20, 35, 60):
-        多锁, 空锁 = 锁2_水位金叉运行(dif, dea, 守卫)
-        assert not 多锁[:守卫].any() and not 空锁[:守卫].any()      # 第一层
+        多开, 空开 = 动量开关(dif, dea, 守卫)
+        assert not 多开[:守卫].any() and not 空开[:守卫].any()      # 第一层
         金, 死 = 金叉死叉(dif, dea)
-        for arr, 事件, 水下 in ((多锁, 金, True), (空锁, 死, False)):
+        for arr, 事件, 水下 in ((多开, 金, True), (空开, 死, False)):
             起 = np.flatnonzero(arr & ~np.r_[False, arr[:-1]])
             for b in 起:                                            # 第二层
                 assert 事件[b], f"守卫={守卫} 锁在 b={b} 开了, 但那一根不是交叉根"
@@ -114,30 +114,30 @@ def test_锁2的两层暖机守卫(收盘):
                     assert dif[b] > 0 and dea[b] > 0
 
 
-def test_锁2是状态不是事件(收盘):
+def test_开关2是闩锁不是事件(收盘):
     """
     「两个锁都解锁直接触发入场」—— 锁是状态, 开了就一直开到反向交叉。
     如果实现成事件, 每个锁只会有孤立的单根为真。
     """
     dif, dea = macd线(收盘)
-    多锁, _ = 锁2_水位金叉运行(dif, dea, 35)
-    assert 多锁.any()
-    段长 = np.diff(np.flatnonzero(np.diff(np.r_[False, 多锁, False])))[::2]
-    assert 段长.max() > 1, "锁2 被实现成了单根事件, 不是运行段"
+    多开, _ = 动量开关(dif, dea, 35)
+    assert 多开.any()
+    段长 = np.diff(np.flatnonzero(np.diff(np.r_[False, 多开, False])))[::2]
+    assert 段长.max() > 1, "开关2 被实现成了单根事件, 不是运行段"
 
 
-def test_锁2的段落止于反向交叉(收盘):
+def test_开关2的段落止于反向交叉(收盘):
     """多头锁的每一段, 段内必须全程 DIF > DEA。"""
     dif, dea = macd线(收盘)
-    多锁, 空锁 = 锁2_水位金叉运行(dif, dea, 35)
-    assert (dif[多锁] > dea[多锁]).all()
-    assert (dif[空锁] < dea[空锁]).all()
+    多开, 空开 = 动量开关(dif, dea, 35)
+    assert (dif[多开] > dea[多开]).all()
+    assert (dif[空开] < dea[空开]).all()
 
 
-def test_多空锁不可能同时开(收盘):
+def test_多空开不可能同时开(收盘):
     dif, dea = macd线(收盘)
-    多锁, 空锁 = 锁2_水位金叉运行(dif, dea, 35)
-    assert not (多锁 & 空锁).any()
+    多开, 空开 = 动量开关(dif, dea, 35)
+    assert not (多开 & 空开).any()
 
 
 # ------------------------------------------------------ 止损 / 吊灯几何 ----

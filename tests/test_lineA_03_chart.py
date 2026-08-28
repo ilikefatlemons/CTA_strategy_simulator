@@ -142,7 +142,7 @@ def test_没有冷静期时返回None(数据, 钟):
 def test_标记已排序且都落在真实K线上(数据, 名, 钟):
     _, tf, 结果 = 数据
     起 = C.起箱of(tf[名], 结果, 钟)
-    ms = C.标记(结果, tf[名], 起, 钟, 回调=True, 反转=True, 锁=True)
+    ms = C.标记(结果, tf[名], 起, 钟, 回调=True, 反转=True, 开关=True)
     assert ms
     时 = [m["time"] for m in ms]
     assert 时 == sorted(时), "marker_list 不排序, setMarkers 收到乱序会直接报错"
@@ -169,11 +169,11 @@ def test_三个标注开关各自只加自己那一类(数据, 钟):
         加 = [m for m in 开 if m.get("color") == 色]
         assert 加, f"{键} 打开后一个标记都没加"
         assert len(开) == len(基) + len(加)
-    开锁 = C.标记(结果, tfb, 起, 钟, 锁=True)
-    锁标 = [m for m in 开锁 if m.get("color") in (C.锁1色, C.锁2色)]
-    assert 锁标 and len(开锁) == len(基) + len(锁标)
+    开开关 = C.标记(结果, tfb, 起, 钟, 开关=True)
+    锁标 = [m for m in 开开关 if m.get("color") in (C.开关1色, C.开关2色)]
+    assert 锁标 and len(开开关) == len(基) + len(锁标)
     # 两个锁必须用不同颜色, 否则「双重条件」看不出是哪一个先开
-    assert {m["color"] for m in 锁标} == {C.锁1色, C.锁2色}
+    assert {m["color"] for m in 锁标} == {C.开关1色, C.开关2色}
 
 
 def test_出场箭头按结果着色而不是只按理由(数据, 钟):
@@ -194,7 +194,7 @@ def test_标记不伸进暖机段(数据, 钟):
     _, tf, 结果 = 数据
     for 名 in C.周期集:
         起 = C.起箱of(tf[名], 结果, 钟)
-        ms = C.标记(结果, tf[名], 起, 钟, 回调=True, 反转=True, 锁=True)
+        ms = C.标记(结果, tf[名], 起, 钟, 回调=True, 反转=True, 开关=True)
         assert all(m["time"] >= tf[名].bars.index[起] for m in ms)
 
 
