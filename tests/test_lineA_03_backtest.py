@@ -491,3 +491,148 @@ def test_空帧不炸(prep):
     空 = prep.df.iloc[:0]
     r = 跑回测(dataclasses.replace(prep, df=空))
     assert r.交易 == [] and len(r.权益曲线) == 0 and r.末尾未平仓 == 0
+
+
+# ==================================================== 冷静期 rev2 =========
+#
+# C1 `冷静期_解除用状态跨越` (R2′) 与 C2 `冷静期_信号层停摆` 互相独立, 各自关掉即
+# 还原现行行为。下面按方案 §四 的 K1–K9 逐条钉。
+
+def _跑(prep, tf, c1: bool, c2: bool):
+    return 跑回测(prep, tf, 开关=dataclasses.replace(
+        策略开关(), 冷静期_解除用状态跨越=c1, 冷静期_信号层停摆=c2))
+
+
+@pytest.fixture(scope="module")
+def cd开(prep, tf):
+    """两个开关都开 —— 本轮的默认口径。"""
+    return _跑(prep, tf, True, True)
+
+
+def test_K9_两开关都关时走的是旧规则(prep, tf, res):
+    """
+    **最硬的一条**: 两个开关关掉必须完整还原改动前的行为。
+
+    「与改动前逐字节相同」这件事在测试里没法直接写 —— 旧代码已经不在了。所以拆成两
+    条可长期成立的断言:
+
+      1. 关掉时每次解除前, 2h 上必有连续 `冷静期_解冻根数` 根同方向的干净排列
+         (旧规则的结构特征, R2′ 完全不保证这一条)
+      2. 关掉与默认口径**必须不同** —— 否则两个开关是空接的
+
+    改动落地那一次的逐字节比对留在
+    `docs/.../20260828-TP&跳空处理_CD/` 的记录里 (sha256 ae7c1a3b7b061c70)。
+    """
+    from src.strategy.lineA_03 import 三线状态, 未定
+    旧 = _跑(prep, tf, False, False)
+    p = 旧.参数
+    生 = 三线状态(tf[p.大周期].bars["close"].to_numpy("float64"), p.快线, p.慢线)
+    c大 = tf[p.大周期].closed_pos.astype(np.int64)
+    assert 旧.冷静期区间, "一次冻结都没有 —— 空真"
+    查过 = 0
+    for a, b in 旧.冷静期区间:
+        if b + 1 >= len(c大):
+            continue
+        D = int(c大[b + 1])
+        窗 = 生[D - p.冷静期_解冻根数 + 1:D + 1]
+        assert len(窗) == p.冷静期_解冻根数 and 未定 not in 窗 and len(set(窗.tolist())) == 1, (
+            f"旧规则下解除根 {b+1} 之前没有连续 {p.冷静期_解冻根数} 根同方向干净排列: {窗}")
+        查过 += 1
+    assert 查过 >= 3, f"只验到 {查过} 次解除, 样本太薄"
+    键 = lambda r: [(t.入场下标, t.出场下标, t.理由) for t in r.交易]
+    assert 键(旧) != 键(res), "两开关关掉与默认口径完全相同 —— 开关是空接的"
+
+
+@pytest.mark.parametrize("c1,c2", [(True, True), (True, False), (False, True)])
+def test_K1_不存在零长度冻结(prep, tf, c1, c2):
+    """
+    解除只在冻结起点**之后**收盘的 2h 上评估, 所以最短冻结 = 1 根新 2h。
+    零长度冻结意味着冻结当根就解除 —— 那等于 CD 从未生效。
+    """
+    r = _跑(prep, tf, c1, c2)
+    c大 = tf["2h"].closed_pos
+    assert r.冷静期区间, "一次冻结都没有 —— 这条测试是空真的"
+    for a, b in r.冷静期区间:
+        跨 = int(c大[b]) - int(c大[a]) + 1
+        assert 跨 >= 1, f"零长度冻结 @{a}..{b}"
+        assert b >= a
+
+
+def test_K2_解除都落在满足R2撇的根上(prep, tf, cd开):
+    """C1 开启时, 每次解除那一根都必须真的满足 R2′。"""
+    from src.strategy.lineA_03 import 三线状态, 冷静期该解除
+    p = cd开.参数
+    生 = 三线状态(tf[p.大周期].bars["close"].to_numpy("float64"), p.快线, p.慢线)
+    c大 = tf[p.大周期].closed_pos.astype(np.int64)
+    assert cd开.冷静期区间
+    for a, b in cd开.冷静期区间:
+        if b + 1 >= len(c大):
+            continue                      # 数据末尾仍在冻结, 没有解除根
+        D = int(c大[b + 1])
+        assert D >= 1
+        assert 冷静期该解除(生[D - 1], 生[D]), (
+            f"解除根 {b+1} 的 2h 态 {生[D-1]}->{生[D]} 不满足 R2′")
+
+
+def test_K4_冻结期间信号层恒空(prep, tf, cd开):
+    """
+    C2 的核心断言。武装只在 `回调闩锁点` 那一处被置上, 两个开关点也只在已武装时才
+    记 —— 所以「冻结区间内一个观测点都没有」等价于「信号层全程为空」。
+    """
+    点 = [q["下标"] for q in (cd开.回调闩锁点 + cd开.开关1点 + cd开.开关2点)]
+    assert 点, "一个观测点都没有 —— 空真"
+    for a, b in cd开.冷静期区间:
+        落 = [i for i in 点 if a <= i <= b]
+        assert not 落, f"冻结区间 {a}..{b} 内记到了 {len(落)} 个信号层观测点"
+
+
+def test_K5_解除后入场必须有新的水下金叉(prep, tf, cd开):
+    """
+    闩锁段起点必须**严格晚于**解除那一刻已收盘的 15m —— 那一根是在冻结期内收的,
+    不算「新的」。
+    """
+    from src.strategy.lineA_03 import macd线, 动量开关段
+    p = cd开.参数
+    回 = tf[p.回调周期]
+    dif, dea = macd线(回.bars["close"].to_numpy("float64"),
+                      p.MACD快, p.MACD慢, p.MACD信号)
+    _, _, 起 = 动量开关段(dif, dea, p.MACD最少根数)
+    c回 = 回.closed_pos.astype(np.int64)
+    查过 = 0
+    for a, b in cd开.冷静期区间:
+        解 = b + 1
+        if 解 >= len(c回):
+            continue
+        后 = [t for t in cd开.交易 if t.入场下标 > b]
+        if not 后:
+            continue
+        t = 后[0]
+        assert int(起[int(c回[t.入场下标])]) > int(c回[解]), (
+            f"解除于 {解} 之后的首笔 {t.入场时间} 用的闩锁不是新开的")
+        查过 += 1
+    assert 查过 >= 3, f"只验到 {查过} 笔, 样本太薄"
+
+
+@pytest.mark.parametrize("c1,c2", [(True, True), (False, False)])
+def test_K6_冻结与解除都不平仓(prep, tf, c1, c2):
+    """
+    CD 只挡入场, 不碰持仓。冻结是在出场块里、平仓之后才置上的, 所以冻结区间内
+    **不该有任何出场** —— 有的话说明 CD 反过来干预了持仓管理。
+    """
+    r = _跑(prep, tf, c1, c2)
+    出 = [t.出场下标 for t in r.交易]
+    for a, b in r.冷静期区间:
+        # 起点那一根**本来就有一笔出场** —— 冻结正是在出场块里、平仓之后才置上的,
+        # 触发冻结的那笔止损就落在 a。要验的是它**之后**没有出场。
+        落 = [j for j in 出 if a < j <= b]
+        assert not 落, f"冻结区间 ({a}, {b}] 内出现了 {len(落)} 笔出场"
+
+
+def test_K1K2非空真_R2撇确实改变了冻结时长(prep, tf):
+    """
+    守卫: C1 必须**真的**改变行为, 否则上面几条在比较两个相同的东西。
+    """
+    c大 = tf["2h"].closed_pos
+    时长 = lambda r: sum(int(c大[b]) - int(c大[a]) + 1 for a, b in r.冷静期区间)
+    关, 开 = _跑(prep, tf, False, True), _跑(prep, tf, True, True)
+    assert 时长(开) < 时长(关), f"R2′ 没有缩短冻结: {时长(开)} vs {时长(关)}"
